@@ -6,7 +6,7 @@
  * Así se evita CORS y no se expone el token en el cliente.
  */
 
-const ISSUER_URL = 'https://cgcom.127.0.0.1.nip.io:4443/issuer/api/v1/bootstrap';
+const ISSUER_URL = 'https://cgcom.stg.eudistack.net/issuer/api/v1/bootstrap';
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || 'd8511b7c-3617-4509-8cf0-283477841ddc';
 
 export default async function handler(req, res) {

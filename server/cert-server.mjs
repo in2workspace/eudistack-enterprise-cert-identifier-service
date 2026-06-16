@@ -386,7 +386,7 @@ const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, r
           grant_type: 'authorization_code',
         };
 
-        const issuerRes = await fetch('https://cgcom.127.0.0.1.nip.io:4443/issuer/api/v1/bootstrap', {
+        const issuerRes = await fetch('https://cgcom.stg.eudistack.net/issuer/api/v1/bootstrap', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
