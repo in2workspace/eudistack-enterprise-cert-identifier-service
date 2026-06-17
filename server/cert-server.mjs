@@ -18,6 +18,9 @@
  *   node server/cert-server.mjs
  */
 
+// Permite conexiones HTTPS a localhost con certificados mkcert (solo dev).
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 import https from 'node:https';
 import forge from 'node-forge';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -29,6 +32,8 @@ const CERTS_DIR = path.join(__dirname, 'certs');
 const PORT = parseInt(process.env.CERT_PORT || '3443');
 const MTLS_PORT = parseInt(process.env.MTLS_PORT || '3444');
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
+const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || 'd8511b7c-3617-4509-8cf0-283477841ddc';
+const ALLOWED_ORIGINS = new Set([FRONTEND_ORIGIN, 'http://localhost:3001']);
 
 // ─── Certificate management ─────────────────────────────────────────────────
 
@@ -211,14 +216,16 @@ const tlsCert = readFileSync(path.join(CERTS_DIR, 'server.crt'));
 const LANDING_ORIGIN = `https://localhost:${PORT}`;
 const MTLS_ORIGIN = `https://localhost:${MTLS_PORT}`;
 
-function corsHeaders(res) {
-  res.setHeader('Access-Control-Allow-Origin', FRONTEND_ORIGIN);
+function corsHeaders(res, req) {
+  const origin = req?.headers?.origin || '';
+  const allowed = ALLOWED_ORIGINS.has(origin) ? origin : FRONTEND_ORIGIN;
+  res.setHeader('Access-Control-Allow-Origin', allowed);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
 const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, res) => {
-  corsHeaders(res);
+  corsHeaders(res, req);
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -379,11 +386,11 @@ const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, r
           grant_type: 'authorization_code',
         };
 
-        const issuerRes = await fetch('https://issuer.cgcom.demo.fikua.com/api/v1/bootstrap', {
+        const issuerRes = await fetch('https://cgcom.stg.eudistack.net/issuer/api/v1/bootstrap', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Bootstrap-Token': 'd8511b7c-3617-4509-8cf0-283477841ddc',
+            'X-Bootstrap-Token': BOOTSTRAP_TOKEN,
           },
           body: JSON.stringify(bootstrapPayload),
           signal: AbortSignal.timeout(10_000),
