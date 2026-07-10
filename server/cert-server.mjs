@@ -32,8 +32,13 @@ const CERTS_DIR = path.join(__dirname, 'certs');
 const PORT = parseInt(process.env.CERT_PORT || '3443');
 const MTLS_PORT = parseInt(process.env.MTLS_PORT || '3444');
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
-const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || 'd8511b7c-3617-4509-8cf0-283477841ddc';
-const ALLOWED_ORIGINS = new Set([FRONTEND_ORIGIN, 'http://localhost:3001']);
+const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || '';
+const ISSUER_URL = process.env.ISSUER_URL || 'https://cgcom.127.0.0.1.nip.io:4443/issuer/api/v1/bootstrap';
+const ALLOWED_ORIGINS = new Set([
+  FRONTEND_ORIGIN,
+  'http://localhost:3001',
+  'https://cgcom.127.0.0.1.nip.io:4443',
+]);
 
 // ─── Certificate management ─────────────────────────────────────────────────
 
@@ -386,7 +391,7 @@ const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, r
           grant_type: 'authorization_code',
         };
 
-        const issuerRes = await fetch('https://cgcom.stg.eudistack.net/issuer/api/v1/bootstrap', {
+        const issuerRes = await fetch(ISSUER_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -420,8 +425,15 @@ const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, r
     return;
   }
 
-  // ── Health / landing ───────────────────────────────────────────────────
-  if (req.url === '/' || req.url === '/health') {
+  // ── Health check ───────────────────────────────────────────────────────
+  if (req.url === '/health' || req.url === '/identify/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'UP' }));
+    return;
+  }
+
+  // ── Landing page ───────────────────────────────────────────────────────
+  if (req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(
       htmlPage(
