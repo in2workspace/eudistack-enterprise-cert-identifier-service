@@ -21,6 +21,7 @@
 // Permite conexiones HTTPS a localhost con certificados mkcert (solo dev).
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
+import http from 'node:http';
 import https from 'node:https';
 import forge from 'node-forge';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
@@ -29,11 +30,21 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CERTS_DIR = path.join(__dirname, 'certs');
-const PORT = parseInt(process.env.CERT_PORT || '3443');
+const PORT = parseInt(process.env.CERT_PORT || '8080');
 const MTLS_PORT = parseInt(process.env.MTLS_PORT || '3444');
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
-const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || 'd8511b7c-3617-4509-8cf0-283477841ddc';
-const ALLOWED_ORIGINS = new Set([FRONTEND_ORIGIN, 'http://localhost:3001']);
+// Origin of the popup page as seen by the browser (nginx URL in production, localhost in standalone mode)
+const LANDING_ORIGIN = process.env.LANDING_ORIGIN || FRONTEND_ORIGIN;
+// Direct URL to the mTLS server — must be reachable by the browser (Docker port mapping or NLB)
+const MTLS_ORIGIN = process.env.MTLS_ORIGIN || `https://localhost:${MTLS_PORT}`;
+const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || '';
+const ISSUER_URL = process.env.ISSUER_URL || 'https://cgcom.127.0.0.1.nip.io:4443/issuer/api/v1/bootstrap';
+const ISSUER_TENANT = process.env.ISSUER_TENANT || 'cgcom';
+const ALLOWED_ORIGINS = new Set([
+  FRONTEND_ORIGIN,
+  'http://localhost:3001',
+  'https://cgcom.127.0.0.1.nip.io:4443',
+]);
 
 // ─── Certificate management ─────────────────────────────────────────────────
 
@@ -209,12 +220,9 @@ ensureCerts();
 const tlsKey = readFileSync(path.join(CERTS_DIR, 'server.key'));
 const tlsCert = readFileSync(path.join(CERTS_DIR, 'server.crt'));
 
-// ─── Server 1: Regular HTTPS (no client cert) — port 3443 ──────────────────
-// Serves the popup landing page. Always loads, even if the user has no
-// client certificates or cancels the certificate selection dialog.
-
-const LANDING_ORIGIN = `https://localhost:${PORT}`;
-const MTLS_ORIGIN = `https://localhost:${MTLS_PORT}`;
+// ─── Server 1: HTTP (behind ALB/nginx) — port 8080 ─────────────────────────
+// Serves the popup landing page and API endpoints under /identify/*.
+// TLS is terminated by the ALB/nginx; this server speaks plain HTTP.
 
 function corsHeaders(res, req) {
   const origin = req?.headers?.origin || '';
@@ -224,7 +232,7 @@ function corsHeaders(res, req) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, res) => {
+const regularServer = http.createServer((req, res) => {
   corsHeaders(res, req);
 
   if (req.method === 'OPTIONS') {
@@ -234,9 +242,9 @@ const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, r
   }
 
   // ── Popup landing page with iframe to mTLS server ───────────────────────
-  if (req.url === '/cert-auth' || req.url?.startsWith('/cert-auth?')) {
+  if (req.url === '/identify/cert-auth' || req.url?.startsWith('/identify/cert-auth?')) {
     // Read the opener's origin from query parameter (passed by the frontend)
-    const reqUrl = new URL(req.url, 'https://localhost');
+    const reqUrl = new URL(req.url, 'http://localhost');
     const openerOrigin = reqUrl.searchParams.get('origin') || FRONTEND_ORIGIN;
 
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -359,7 +367,7 @@ const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, r
   }
 
   // ── Bootstrap endpoint (proxy al issuer CGCOM) ─────────────────────────
-  if (req.url === '/api/bootstrap' && req.method === 'POST') {
+  if (req.url === '/identify/api/bootstrap' && req.method === 'POST') {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', async () => {
@@ -386,11 +394,12 @@ const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, r
           grant_type: 'authorization_code',
         };
 
-        const issuerRes = await fetch('https://cgcom.stg.eudistack.net/issuer/api/v1/bootstrap', {
+        const issuerRes = await fetch(ISSUER_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Bootstrap-Token': BOOTSTRAP_TOKEN,
+            'X-Tenant': ISSUER_TENANT,
           },
           body: JSON.stringify(bootstrapPayload),
           signal: AbortSignal.timeout(10_000),
@@ -420,8 +429,15 @@ const regularServer = https.createServer({ key: tlsKey, cert: tlsCert }, (req, r
     return;
   }
 
-  // ── Health / landing ───────────────────────────────────────────────────
-  if (req.url === '/' || req.url === '/health') {
+  // ── Health check ───────────────────────────────────────────────────────
+  if (req.url === '/identify/health' || req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'UP' }));
+    return;
+  }
+
+  // ── Landing page ───────────────────────────────────────────────────────
+  if (req.url === '/') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(
       htmlPage(
@@ -517,9 +533,9 @@ const mtlsServer = https.createServer(
 
 regularServer.listen(PORT, () => {
   console.log(`\n  Servidor de Certificados CGCOM`);
-  console.log(`  Landing:  https://localhost:${PORT}`);
-  console.log(`  mTLS:     https://localhost:${MTLS_PORT}`);
-  console.log(`  Endpoint: https://localhost:${PORT}/cert-auth`);
+  console.log(`  HTTP:     http://localhost:${PORT}  (behind nginx/ALB)`);
+  console.log(`  mTLS:     https://localhost:${MTLS_PORT}  (direct, browser port mapping)`);
+  console.log(`  Popup:    ${LANDING_ORIGIN}/identify/cert-auth`);
   console.log(`  Frontend: ${FRONTEND_ORIGIN}`);
 });
 
