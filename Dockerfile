@@ -5,5 +5,5 @@ RUN npm ci --omit=dev
 COPY server/ ./server/
 RUN chown -R node:node /app
 USER node
-EXPOSE 3443 3444
+EXPOSE 8080 3444
 CMD ["node", "server/cert-server.mjs"]
