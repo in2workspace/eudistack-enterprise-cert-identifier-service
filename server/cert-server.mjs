@@ -39,6 +39,7 @@ const LANDING_ORIGIN = process.env.LANDING_ORIGIN || FRONTEND_ORIGIN;
 const MTLS_ORIGIN = process.env.MTLS_ORIGIN || `https://localhost:${MTLS_PORT}`;
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || '';
 const ISSUER_URL = process.env.ISSUER_URL || 'https://cgcom.127.0.0.1.nip.io:4443/issuer/api/v1/bootstrap';
+const ISSUER_TENANT = process.env.ISSUER_TENANT || 'cgcom';
 const ALLOWED_ORIGINS = new Set([
   FRONTEND_ORIGIN,
   'http://localhost:3001',
@@ -398,6 +399,7 @@ const regularServer = http.createServer((req, res) => {
           headers: {
             'Content-Type': 'application/json',
             'X-Bootstrap-Token': BOOTSTRAP_TOKEN,
+            'X-Tenant': ISSUER_TENANT,
           },
           body: JSON.stringify(bootstrapPayload),
           signal: AbortSignal.timeout(10_000),
