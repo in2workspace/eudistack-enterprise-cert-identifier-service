@@ -242,10 +242,81 @@ const regularServer = http.createServer((req, res) => {
   }
 
   // ── Popup landing page with iframe to mTLS server ───────────────────────
-  if (req.url === '/identify/cert-auth' || req.url?.startsWith('/identify/cert-auth?')) {
-    // Read the opener's origin from query parameter (passed by the frontend)
+  if (req.url === '/identify/api/cert-auth' || req.url?.startsWith('/identify/api/cert-auth?')) {
     const reqUrl = new URL(req.url, 'http://localhost');
     const openerOrigin = reqUrl.searchParams.get('origin') || FRONTEND_ORIGIN;
+
+    // ── ALB mTLS mode (STG): cert delivered via header ────────────────────
+    const albCertPem = req.headers['x-amzn-mtls-clientcert'];
+    if (albCertPem) {
+      try {
+        const pem = decodeURIComponent(albCertPem);
+        const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+        const derBuffer = Buffer.from(b64, 'base64');
+        const certData = extractCertificateAttributes(derBuffer);
+
+        if (!certData) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
+<script>
+  if (window.opener) {
+    window.opener.postMessage(
+      { type: 'CERT_AUTH_ERROR', error: 'Error al procesar el certificado digital' },
+      ${JSON.stringify(openerOrigin)}
+    );
+  }
+  window.close();
+</script>
+</body></html>`);
+          return;
+        }
+
+        const certDataJSON = JSON.stringify(certData);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <title>Certificado leído — CGCOM</title>
+  <style>${COMMON_STYLES}</style>
+</head>
+<body>
+  <div class="card">
+    <h2 class="success">Certificado leído correctamente</h2>
+    <p>Enviando datos al portal...</p>
+    <p><span class="spinner"></span></p>
+  </div>
+  <script>
+    if (window.opener) {
+      window.opener.postMessage(
+        { type: 'CERT_AUTH_SUCCESS', data: ${certDataJSON} },
+        ${JSON.stringify(openerOrigin)}
+      );
+      setTimeout(() => window.close(), 1200);
+    }
+  </script>
+</body>
+</html>`);
+        return;
+      } catch (err) {
+        console.error('Error procesando cert ALB mTLS:', err.message);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
+<script>
+  if (window.opener) {
+    window.opener.postMessage(
+      { type: 'CERT_AUTH_ERROR', error: 'Error interno al leer el certificado' },
+      ${JSON.stringify(openerOrigin)}
+    );
+  }
+  window.close();
+</script>
+</body></html>`);
+        return;
+      }
+    }
+
+    // ── Local dev mode: serve iframe page (mTLS on MTLS_ORIGIN) ──────────
 
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<!DOCTYPE html>
@@ -535,7 +606,7 @@ regularServer.listen(PORT, () => {
   console.log(`\n  Servidor de Certificados CGCOM`);
   console.log(`  HTTP:     http://localhost:${PORT}  (behind nginx/ALB)`);
   console.log(`  mTLS:     https://localhost:${MTLS_PORT}  (direct, browser port mapping)`);
-  console.log(`  Popup:    ${LANDING_ORIGIN}/identify/cert-auth`);
+  console.log(`  Popup:    ${LANDING_ORIGIN}/identify/api/cert-auth`);
   console.log(`  Frontend: ${FRONTEND_ORIGIN}`);
 });
 
