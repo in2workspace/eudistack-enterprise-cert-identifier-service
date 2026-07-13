@@ -465,12 +465,15 @@ const regularServer = http.createServer((req, res) => {
           grant_type: 'authorization_code',
         };
 
+        const { protocol, host } = new URL(FRONTEND_ORIGIN);
         const issuerRes = await fetch(ISSUER_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Bootstrap-Token': BOOTSTRAP_TOKEN,
             'X-Tenant': ISSUER_TENANT,
+            'X-Forwarded-Proto': protocol.replace(':', ''),
+            'X-Forwarded-Host': host,
           },
           body: JSON.stringify(bootstrapPayload),
           signal: AbortSignal.timeout(10_000),
