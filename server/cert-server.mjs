@@ -129,6 +129,23 @@ const OID_MAP = {
   '1.2.840.113549.1.9.1': 'emailAddress',
 };
 
+// Maps Node.js TLS short-names / OIDs to our field names (used for non-RSA fallback)
+const TLS_ATTR_MAP = {
+  CN: 'commonName',
+  SN: 'surname',
+  serialNumber: 'serialNumber',
+  C: 'country',
+  L: 'locality',
+  ST: 'province',
+  O: 'organization',
+  OU: 'organizationalUnit',
+  GN: 'givenName',
+  givenName: 'givenName',
+  emailAddress: 'emailAddress',
+  organizationIdentifier: 'organizationIdentifier',
+  '2.5.4.97': 'organizationIdentifier',
+};
+
 /**
  * Re-interpret a string whose code-points are actually UTF-8 bytes
  * (forge decodes ASN.1 UTF8String / BMPString as Latin-1 code-points).
@@ -153,7 +170,8 @@ function mapAttributes(attrs) {
   return result;
 }
 
-function extractCertificateAttributes(rawDerBuffer) {
+function extractCertificateAttributes(rawDerBuffer, peerCert) {
+  // Primary path: node-forge (RSA certificates, full encoding correction)
   try {
     const derHex = rawDerBuffer.toString('binary');
     const asn1 = forge.asn1.fromDer(derHex);
@@ -173,9 +191,33 @@ function extractCertificateAttributes(rawDerBuffer) {
       validTo: cert.validity.notAfter.toISOString(),
       certificateType: certType,
     };
-  } catch (err) {
-    console.error('Error parseando certificado:', err.message);
-    return null;
+  } catch (forgeErr) {
+    // Fallback: Node.js TLS already parsed the peer cert for all key types
+    // (RSA, ECDSA, Ed25519…). Use it when forge cannot handle the algorithm.
+    console.warn(`forge parse failed (${forgeErr.message}), falling back to native TLS attributes`);
+    if (!peerCert) return null;
+    try {
+      const mapTls = (nodeAttrs) => {
+        const result = {};
+        for (const [k, v] of Object.entries(nodeAttrs)) {
+          result[TLS_ATTR_MAP[k] || k] = v;
+        }
+        return result;
+      };
+      const subject = mapTls(peerCert.subject);
+      const issuer  = mapTls(peerCert.issuer);
+      const certType = subject.organizationIdentifier ? 'organizational' : 'personal';
+      return {
+        subject,
+        issuer,
+        validFrom: new Date(peerCert.valid_from).toISOString(),
+        validTo:   new Date(peerCert.valid_to).toISOString(),
+        certificateType: certType,
+      };
+    } catch (nativeErr) {
+      console.error('Error parseando certificado (nativo):', nativeErr.message);
+      return null;
+    }
   }
 }
 
@@ -570,7 +612,7 @@ const mtlsServer = https.createServer(
         return;
       }
 
-      const certData = extractCertificateAttributes(peerCert.raw);
+      const certData = extractCertificateAttributes(peerCert.raw, peerCert);
 
       if (!certData) {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
