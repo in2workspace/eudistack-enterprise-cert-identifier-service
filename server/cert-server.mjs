@@ -23,6 +23,7 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import http from 'node:http';
 import https from 'node:https';
+import { X509Certificate } from 'node:crypto';
 import forge from 'node-forge';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -111,74 +112,63 @@ function ensureCerts() {
   console.log('Certificados autofirmados generados en', CERTS_DIR);
 }
 
-// ─── X.509 attribute extraction (mirrors onboarding x509util.go) ────────────
+// ─── X.509 attribute extraction ──────────────────────────────────────────
+//
+// Uses Node.js crypto.X509Certificate (available since Node 15.6) instead of
+// node-forge, which only handles RSA keys and fails on ECDSA certificates
+// (error: "Cannot read public key. OID is not RSA.").
 
-const OID_MAP = {
-  '2.5.4.3': 'commonName',
-  '2.5.4.4': 'surname',
-  '2.5.4.5': 'serialNumber', // DNI in Spanish certificates
-  '2.5.4.6': 'country',
-  '2.5.4.7': 'locality',
-  '2.5.4.8': 'province',
-  '2.5.4.9': 'streetAddress',
-  '2.5.4.10': 'organization',
-  '2.5.4.11': 'organizationalUnit',
-  '2.5.4.17': 'postalCode',
-  '2.5.4.42': 'givenName',
-  '2.5.4.97': 'organizationIdentifier',
-  '1.2.840.113549.1.9.1': 'emailAddress',
+const DN_KEY_MAP = {
+  CN: 'commonName',
+  GN: 'givenName',
+  SN: 'surname',
+  C: 'country',
+  L: 'locality',
+  ST: 'province',
+  O: 'organization',
+  OU: 'organizationalUnit',
+  emailAddress: 'emailAddress',
+  street: 'streetAddress',
+  postalCode: 'postalCode',
+  serialNumber: 'serialNumber',
+  organizationIdentifier: 'organizationIdentifier',
 };
 
 /**
- * Re-interpret a string whose code-points are actually UTF-8 bytes
- * (forge decodes ASN.1 UTF8String / BMPString as Latin-1 code-points).
+ * Parse the multiline "key=value
+key=value" DN string that Node.js
+ * X509Certificate.subject / .issuer returns into a plain object.
  */
-function fixEncoding(str) {
-  if (typeof str !== 'string') return str;
-  try {
-    const bytes = new Uint8Array([...str].map(c => c.charCodeAt(0)));
-    const decoded = new TextDecoder('utf-8').decode(bytes);
-    if (!decoded.includes('\uFFFD')) return decoded;
-  } catch { /* fall through */ }
-  return str;
-}
-
-function mapAttributes(attrs) {
+function parseDNString(dnStr) {
   const result = {};
-  for (const attr of attrs) {
-    const oid = attr.type;
-    const fieldName = OID_MAP[oid] || attr.shortName || oid;
-    result[fieldName] = fixEncoding(attr.value);
+  for (const line of (dnStr || '').split('\n')) {
+    const eq = line.indexOf('=');
+    if (eq < 0) continue;
+    const rawKey = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    if (value) result[DN_KEY_MAP[rawKey] ?? rawKey] = value;
   }
   return result;
 }
 
 function extractCertificateAttributes(rawDerBuffer) {
   try {
-    const derHex = rawDerBuffer.toString('binary');
-    const asn1 = forge.asn1.fromDer(derHex);
-    const cert = forge.pki.certificateFromAsn1(asn1);
-
-    const subject = mapAttributes(cert.subject.attributes);
-    const issuer = mapAttributes(cert.issuer.attributes);
-
-    const certType = subject.organizationIdentifier
-      ? 'organizational'
-      : 'personal';
+    const x509 = new X509Certificate(rawDerBuffer);
+    const subject = parseDNString(x509.subject);
+    const issuer = parseDNString(x509.issuer);
 
     return {
       subject,
       issuer,
-      validFrom: cert.validity.notBefore.toISOString(),
-      validTo: cert.validity.notAfter.toISOString(),
-      certificateType: certType,
+      validFrom: new Date(x509.validFrom).toISOString(),
+      validTo: new Date(x509.validTo).toISOString(),
+      certificateType: subject.organizationIdentifier ? 'organizational' : 'personal',
     };
   } catch (err) {
     console.error('Error parseando certificado:', err.message);
     return null;
   }
 }
-
 // ─── HTML helpers ───────────────────────────────────────────────────────────
 
 const COMMON_STYLES = `
