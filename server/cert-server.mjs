@@ -23,6 +23,7 @@ process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
 import http from 'node:http';
 import https from 'node:https';
+import { X509Certificate } from 'node:crypto';
 import forge from 'node-forge';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -170,6 +171,19 @@ function mapAttributes(attrs) {
   return result;
 }
 
+// Parses Node.js X509Certificate subject/issuer multiline format ("CN=Foo\nO=Bar\n...")
+function parseX509Name(name) {
+  const result = {};
+  for (const line of name.split('\n')) {
+    const eqIdx = line.indexOf('=');
+    if (eqIdx < 0) continue;
+    const key = line.slice(0, eqIdx).trim();
+    const value = line.slice(eqIdx + 1).trim();
+    result[TLS_ATTR_MAP[key] || key] = value;
+  }
+  return result;
+}
+
 function extractCertificateAttributes(rawDerBuffer, peerCert) {
   // Primary path: node-forge (RSA certificates, full encoding correction)
   try {
@@ -192,31 +206,52 @@ function extractCertificateAttributes(rawDerBuffer, peerCert) {
       certificateType: certType,
     };
   } catch (forgeErr) {
-    // Fallback: Node.js TLS already parsed the peer cert for all key types
-    // (RSA, ECDSA, Ed25519…). Use it when forge cannot handle the algorithm.
-    console.warn(`forge parse failed (${forgeErr.message}), falling back to native TLS attributes`);
-    if (!peerCert) return null;
+    // Fallback 1: crypto.X509Certificate — built-in Node.js, supports all key types
+    // (ECDSA, Ed25519, RSA-PSS…). Works for both ALB path (DER from header) and
+    // direct mTLS path. forge only fails on the public-key algorithm, not on the
+    // subject/issuer/validity fields we actually need.
+    console.warn(`forge parse failed (${forgeErr.message}), falling back to crypto.X509Certificate`);
     try {
-      const mapTls = (nodeAttrs) => {
-        const result = {};
-        for (const [k, v] of Object.entries(nodeAttrs)) {
-          result[TLS_ATTR_MAP[k] || k] = v;
-        }
-        return result;
-      };
-      const subject = mapTls(peerCert.subject);
-      const issuer  = mapTls(peerCert.issuer);
+      const x509 = new X509Certificate(rawDerBuffer);
+      const subject = parseX509Name(x509.subject);
+      const issuer  = parseX509Name(x509.issuer);
       const certType = subject.organizationIdentifier ? 'organizational' : 'personal';
       return {
         subject,
         issuer,
-        validFrom: new Date(peerCert.valid_from).toISOString(),
-        validTo:   new Date(peerCert.valid_to).toISOString(),
+        validFrom: new Date(x509.validFrom).toISOString(),
+        validTo:   new Date(x509.validTo).toISOString(),
         certificateType: certType,
       };
-    } catch (nativeErr) {
-      console.error('Error parseando certificado (nativo):', nativeErr.message);
-      return null;
+    } catch (x509Err) {
+      // Fallback 2: peerCert TLS attributes (direct mTLS path only — no DER in ALB path)
+      console.warn(`X509Certificate fallback failed (${x509Err.message}), trying peerCert`);
+      if (!peerCert) {
+        console.error('No peerCert available; cannot parse non-RSA certificate');
+        return null;
+      }
+      try {
+        const mapTls = (nodeAttrs) => {
+          const result = {};
+          for (const [k, v] of Object.entries(nodeAttrs)) {
+            result[TLS_ATTR_MAP[k] || k] = v;
+          }
+          return result;
+        };
+        const subject = mapTls(peerCert.subject);
+        const issuer  = mapTls(peerCert.issuer);
+        const certType = subject.organizationIdentifier ? 'organizational' : 'personal';
+        return {
+          subject,
+          issuer,
+          validFrom: new Date(peerCert.valid_from).toISOString(),
+          validTo:   new Date(peerCert.valid_to).toISOString(),
+          certificateType: certType,
+        };
+      } catch (nativeErr) {
+        console.error('Error parseando certificado (nativo):', nativeErr.message);
+        return null;
+      }
     }
   }
 }
