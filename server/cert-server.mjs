@@ -39,13 +39,100 @@ const LANDING_ORIGIN = process.env.LANDING_ORIGIN || FRONTEND_ORIGIN;
 // Direct URL to the mTLS server — must be reachable by the browser (Docker port mapping or NLB)
 const MTLS_ORIGIN = process.env.MTLS_ORIGIN || `https://localhost:${MTLS_PORT}`;
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || '';
-const ISSUER_URL = process.env.ISSUER_URL || 'https://cgcom.127.0.0.1.nip.io:4443/issuer/api/v1/bootstrap';
-const ISSUER_TENANT = process.env.ISSUER_TENANT || 'cgcom';
+// Explicit override for non-standard topologies; unset by default — the issuer
+// URL and tenant are resolved per-request from the caller's own Host (below),
+// so one running instance serves every tenant subdomain correctly (R-5).
+const ISSUER_URL_OVERRIDE = process.env.ISSUER_URL || '';
+const ISSUER_TENANT_OVERRIDE = process.env.ISSUER_TENANT || '';
 const ALLOWED_ORIGINS = new Set([
   FRONTEND_ORIGIN,
   'http://localhost:3001',
-  'https://cgcom.127.0.0.1.nip.io:4443',
 ]);
+
+/**
+ * Host público real (con puerto) de la petición entrante. nginx setea `Host`
+ * con `$host` (SIN puerto) pero `X-Forwarded-Host` con `$http_host` (CON
+ * puerto) — hay que preferir este último o cualquier URL construida a partir
+ * de él (X-Forwarded-Host hacia el issuer, credential-offer, wallet callback)
+ * pierde el puerto en cualquier setup que no use el 443/80 por defecto (dev
+ * local en :4443), rompiendo la wallet aunque el tenant se resuelva bien.
+ */
+function requestHost(req) {
+  return req.headers['x-forwarded-host'] || req.headers.host;
+}
+
+/** Primer segmento del hostname (sin puerto), en minúsculas — mismo algoritmo que resolveTenantIdentity() del frontend (AD-3). */
+function resolveTenantFromHost(host) {
+  if (!host) return null;
+  const hostname = host.split(':')[0].toLowerCase();
+  const segments = hostname.split('.');
+  return segments.length >= 2 && segments[0].length > 0 ? segments[0] : null;
+}
+
+/** Organización "mandataria" (empleador) por tenant — mismos valores que EMPLOYEE_DEMO_PROFILE en eudistack-cgcom-mfe-cert-identifier, para que la credencial emitida coincida con lo que vio el titular en pantalla. */
+const EMPLOYEE_MANDATOR_BY_TENANT = {
+  calidalia: {
+    commonName: 'Gallo',
+    organization: 'Gallo',
+    organizationIdentifier: 'VATES-Q2802224G',
+    serialNumber: 'Q2802224G',
+    email: 'info@gallo.es',
+  },
+};
+
+const DEFAULT_EMPLOYEE_MANDATOR = {
+  commonName: 'Altia Consultoría y Tecnología',
+  organization: 'Altia Consultoría y Tecnología',
+  organizationIdentifier: 'VATES-A15726083',
+  serialNumber: 'A15726083',
+  email: 'info@altia.es',
+};
+
+/**
+ * Payload `learcredential.employee.sd.1` (mandate.mandator/mandatee/power) —
+ * todo tenant que no sea CGCOM emite esta credencial LEARCredentialEmployee
+ * en vez de doctorid.sd.1 (que solo CGCOM tiene registrado en su
+ * tenant_credential_profile, postgres/seed-tenants.sql). El backend del
+ * Issuer envuelve el payload completo bajo "mandate" cuando
+ * credentialSubjectStrategy no es "direct" (GenericCredentialBuilder), así
+ * que aquí NO se anida bajo "mandate" — mandator/mandatee/power van al
+ * nivel superior del payload.
+ */
+function buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, tenant }) {
+  const mandator = EMPLOYEE_MANDATOR_BY_TENANT[tenant] || DEFAULT_EMPLOYEE_MANDATOR;
+
+  return {
+    credential_configuration_id: 'learcredential.employee.sd.1',
+    payload: {
+      mandator: {
+        commonName: mandator.commonName,
+        country: 'ES',
+        email: mandator.email,
+        organization: mandator.organization,
+        organizationIdentifier: mandator.organizationIdentifier,
+        serialNumber: mandator.serialNumber,
+      },
+      mandatee: {
+        employeeId: userData.collegiateNumber || '20240001',
+        email,
+        firstName,
+        lastName,
+      },
+      power: [
+        { domain: 'DOME', function: 'Onboarding', action: 'Execute', type: 'Domain' },
+      ],
+    },
+    delivery: 'ui',
+    email,
+    grant_type: 'authorization_code',
+  };
+}
+
+/** Origin same-origin de la petición entrante (protocolo real vía X-Forwarded-Proto detrás de nginx). */
+function resolveRequestOrigin(req) {
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  return `${proto}://${requestHost(req)}`;
+}
 
 // ─── Certificate management ─────────────────────────────────────────────────
 
@@ -303,7 +390,9 @@ const tlsCert = readFileSync(path.join(CERTS_DIR, 'server.crt'));
 
 function corsHeaders(res, req) {
   const origin = req?.headers?.origin || '';
-  const allowed = ALLOWED_ORIGINS.has(origin) ? origin : FRONTEND_ORIGIN;
+  // Same-origin call through nginx (any tenant subdomain) or a known static dev origin.
+  const isSameOrigin = origin === resolveRequestOrigin(req);
+  const allowed = isSameOrigin || ALLOWED_ORIGINS.has(origin) ? origin : FRONTEND_ORIGIN;
   res.setHeader('Access-Control-Allow-Origin', allowed);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -422,8 +511,10 @@ const regularServer = http.createServer((req, res) => {
     </p>
   </div>
 
-  <!-- Hidden iframe that triggers the mTLS handshake on port ${MTLS_PORT} -->
-  <iframe id="mtls-frame" src="${MTLS_ORIGIN}/cert-auth"></iframe>
+  <!-- Hidden iframe that triggers the mTLS handshake on port ${MTLS_PORT}.
+       Propaga el origin real del tenant (R-5): el server mTLS no tiene forma
+       de resolverlo por sí mismo (puerto directo, sin Host de tenant). -->
+  <iframe id="mtls-frame" src="${MTLS_ORIGIN}/cert-auth?origin=${encodeURIComponent(openerOrigin)}"></iframe>
 
   <script>
     const FRONTEND = '${openerOrigin}';
@@ -506,7 +597,8 @@ const regularServer = http.createServer((req, res) => {
         '<h2>Certificado Digital</h2>' +
         '<p><span class="spinner"></span></p>' +
         '<p>Selecciona tu certificado en el diálogo del navegador...</p>';
-      document.getElementById('mtls-frame').src = '${MTLS_ORIGIN}/cert-auth?' + Date.now();
+      document.getElementById('mtls-frame').src =
+        '${MTLS_ORIGIN}/cert-auth?origin=' + encodeURIComponent(FRONTEND) + '&t=' + Date.now();
     }
   </script>
 </body>
@@ -524,33 +616,59 @@ const regularServer = http.createServer((req, res) => {
         const nameParts = (userData.name || '').trim().split(' ');
         const firstName = nameParts[0] || 'María';
         const lastName = nameParts.slice(1).join(' ') || 'García López';
+        const email = userData.email || 'maria.garcia@cgcom.es';
 
-        const bootstrapPayload = {
-          credential_configuration_id: 'doctorid.sd.1',
-          payload: {
-            firstName,
-            lastName,
-            registrationNumber: userData.collegiateNumber || '282801234',
-            nationalId: userData.dni || '12345678A',
-            provincialBoard: 'COM Barcelona',
-            specialty: 'Medicina Interna',
-            email: userData.email || 'maria.garcia@cgcom.es',
-            country: 'ES',
-          },
-          delivery: 'ui',
-          email: userData.email || 'maria.garcia@cgcom.es',
-          grant_type: 'authorization_code',
-        };
+        // credential_configuration_id por tenant (R-6): solo CGCOM tiene
+        // 'doctorid.sd.1' registrado en su tenant_credential_profile
+        // (postgres/seed-tenants.sql) — el resto de tenants (calidalia,
+        // dome, kpmg, sandbox...) solo tienen 'learcredential.employee.sd.1'.
+        // Enviar doctorid.sd.1 a un tenant sin ese perfil hace que el Issuer
+        // rechace el bootstrap, rompiendo "añadir credencial" para cualquier
+        // tenant que no sea CGCOM.
+        const tenantForPayload = resolveTenantFromHost(requestHost(req)) || ISSUER_TENANT_OVERRIDE;
+        const bootstrapPayload =
+          tenantForPayload === 'cgcom'
+            ? {
+                credential_configuration_id: 'doctorid.sd.1',
+                payload: {
+                  firstName,
+                  lastName,
+                  registrationNumber: userData.collegiateNumber || '282801234',
+                  nationalId: userData.dni || '12345678A',
+                  provincialBoard: 'COM Barcelona',
+                  specialty: 'Medicina Interna',
+                  email,
+                  country: 'ES',
+                },
+                delivery: 'ui',
+                email,
+                grant_type: 'authorization_code',
+              }
+            : buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, tenant: tenantForPayload });
 
-        const { protocol, host } = new URL(FRONTEND_ORIGIN);
-        const issuerRes = await fetch(ISSUER_URL, {
+        // Tenant, issuer y X-Forwarded-* se resuelven por petición desde el Host
+        // con el que el navegador llamó a este servicio — mismo tenant que la
+        // pantalla que disparó el bootstrap, nunca un valor fijo (R-5, bug con
+        // tenant "dome"/"calidalia"). ISSUER_URL apunta al servicio interno de
+        // Docker (bypassa nginx), así que el Issuer solo puede saber el host
+        // público real (para las URLs que embebe en la credential offer: token
+        // endpoint, credential endpoint, wallet callback) a través de estos
+        // X-Forwarded-* — usar el FRONTEND_ORIGIN estático aquí generaba una
+        // credential offer con URLs de cgcom aunque el tenant bootstrapeado
+        // (X-Tenant) fuera el correcto, rompiendo la wallet en cualquier otro
+        // tenant.
+        const tenant = tenantForPayload;
+        const issuerUrl = ISSUER_URL_OVERRIDE || `${resolveRequestOrigin(req)}/issuer/api/v1/bootstrap`;
+        const forwardedProto = req.headers['x-forwarded-proto'] || 'https';
+        const forwardedHost = requestHost(req) || new URL(FRONTEND_ORIGIN).host;
+        const issuerRes = await fetch(issuerUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Bootstrap-Token': BOOTSTRAP_TOKEN,
-            'X-Tenant': ISSUER_TENANT,
-            'X-Forwarded-Proto': protocol.replace(':', ''),
-            'X-Forwarded-Host': host,
+            ...(tenant ? { 'X-Tenant': tenant } : {}),
+            'X-Forwarded-Proto': forwardedProto,
+            'X-Forwarded-Host': forwardedHost,
           },
           body: JSON.stringify(bootstrapPayload),
           signal: AbortSignal.timeout(10_000),
@@ -622,8 +740,14 @@ const regularServer = http.createServer((req, res) => {
 const mtlsServer = https.createServer(
   { key: tlsKey, cert: tlsCert, requestCert: true, rejectUnauthorized: false },
   (req, res) => {
+    // Origin real del tenant, propagado por query param desde la landing page
+    // (R-5): este server no tiene Host de tenant propio (puerto directo 3444),
+    // así que LANDING_ORIGIN solo es fallback para llamadas sin el param.
+    const reqUrl = new URL(req.url, `https://localhost:${MTLS_PORT}`);
+    const targetOrigin = reqUrl.searchParams.get('origin') || LANDING_ORIGIN;
+
     // Allow the landing page to embed this in an iframe
-    res.setHeader('Access-Control-Allow-Origin', LANDING_ORIGIN);
+    res.setHeader('Access-Control-Allow-Origin', targetOrigin);
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -640,7 +764,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_NO_CERT' },
-    '${LANDING_ORIGIN}'
+    ${JSON.stringify(targetOrigin)}
   );
 </script>
 </body></html>`);
@@ -655,7 +779,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_ERROR', error: 'Error al procesar el certificado digital' },
-    '${LANDING_ORIGIN}'
+    ${JSON.stringify(targetOrigin)}
   );
 </script>
 </body></html>`);
@@ -668,7 +792,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_SUCCESS', data: ${certDataJSON} },
-    '${LANDING_ORIGIN}'
+    ${JSON.stringify(targetOrigin)}
   );
 </script>
 </body></html>`);
