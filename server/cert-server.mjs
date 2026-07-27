@@ -39,13 +39,29 @@ const LANDING_ORIGIN = process.env.LANDING_ORIGIN || FRONTEND_ORIGIN;
 // Direct URL to the mTLS server — must be reachable by the browser (Docker port mapping or NLB)
 const MTLS_ORIGIN = process.env.MTLS_ORIGIN || `https://localhost:${MTLS_PORT}`;
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || '';
-const ISSUER_URL = process.env.ISSUER_URL || 'https://cgcom.127.0.0.1.nip.io:4443/issuer/api/v1/bootstrap';
-const ISSUER_TENANT = process.env.ISSUER_TENANT || 'cgcom';
+// Explicit override for non-standard topologies; unset by default — the issuer
+// URL and tenant are resolved per-request from the caller's own Host (below),
+// so one running instance serves every tenant subdomain correctly (R-5).
+const ISSUER_URL_OVERRIDE = process.env.ISSUER_URL || '';
+const ISSUER_TENANT_OVERRIDE = process.env.ISSUER_TENANT || '';
 const ALLOWED_ORIGINS = new Set([
   FRONTEND_ORIGIN,
   'http://localhost:3001',
-  'https://cgcom.127.0.0.1.nip.io:4443',
 ]);
+
+/** Primer segmento del hostname (sin puerto), en minúsculas — mismo algoritmo que resolveTenantIdentity() del frontend (AD-3). */
+function resolveTenantFromHost(host) {
+  if (!host) return null;
+  const hostname = host.split(':')[0].toLowerCase();
+  const segments = hostname.split('.');
+  return segments.length >= 2 && segments[0].length > 0 ? segments[0] : null;
+}
+
+/** Origin same-origin de la petición entrante (protocolo real vía X-Forwarded-Proto detrás de nginx). */
+function resolveRequestOrigin(req) {
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  return `${proto}://${req.headers.host}`;
+}
 
 // ─── Certificate management ─────────────────────────────────────────────────
 
@@ -303,7 +319,9 @@ const tlsCert = readFileSync(path.join(CERTS_DIR, 'server.crt'));
 
 function corsHeaders(res, req) {
   const origin = req?.headers?.origin || '';
-  const allowed = ALLOWED_ORIGINS.has(origin) ? origin : FRONTEND_ORIGIN;
+  // Same-origin call through nginx (any tenant subdomain) or a known static dev origin.
+  const isSameOrigin = origin === resolveRequestOrigin(req);
+  const allowed = isSameOrigin || ALLOWED_ORIGINS.has(origin) ? origin : FRONTEND_ORIGIN;
   res.setHeader('Access-Control-Allow-Origin', allowed);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -422,8 +440,10 @@ const regularServer = http.createServer((req, res) => {
     </p>
   </div>
 
-  <!-- Hidden iframe that triggers the mTLS handshake on port ${MTLS_PORT} -->
-  <iframe id="mtls-frame" src="${MTLS_ORIGIN}/cert-auth"></iframe>
+  <!-- Hidden iframe that triggers the mTLS handshake on port ${MTLS_PORT}.
+       Propaga el origin real del tenant (R-5): el server mTLS no tiene forma
+       de resolverlo por sí mismo (puerto directo, sin Host de tenant). -->
+  <iframe id="mtls-frame" src="${MTLS_ORIGIN}/cert-auth?origin=${encodeURIComponent(openerOrigin)}"></iframe>
 
   <script>
     const FRONTEND = '${openerOrigin}';
@@ -506,7 +526,8 @@ const regularServer = http.createServer((req, res) => {
         '<h2>Certificado Digital</h2>' +
         '<p><span class="spinner"></span></p>' +
         '<p>Selecciona tu certificado en el diálogo del navegador...</p>';
-      document.getElementById('mtls-frame').src = '${MTLS_ORIGIN}/cert-auth?' + Date.now();
+      document.getElementById('mtls-frame').src =
+        '${MTLS_ORIGIN}/cert-auth?origin=' + encodeURIComponent(FRONTEND) + '&t=' + Date.now();
     }
   </script>
 </body>
@@ -542,13 +563,18 @@ const regularServer = http.createServer((req, res) => {
           grant_type: 'authorization_code',
         };
 
+        // Tenant e issuer se resuelven por petición desde el Host con el que
+        // el navegador llamó a este servicio — mismo tenant que la pantalla que
+        // disparó el bootstrap, nunca un valor fijo (R-5, bug con tenant "dome").
+        const tenant = resolveTenantFromHost(req.headers.host) || ISSUER_TENANT_OVERRIDE;
+        const issuerUrl = ISSUER_URL_OVERRIDE || `${resolveRequestOrigin(req)}/issuer/api/v1/bootstrap`;
         const { protocol, host } = new URL(FRONTEND_ORIGIN);
-        const issuerRes = await fetch(ISSUER_URL, {
+        const issuerRes = await fetch(issuerUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Bootstrap-Token': BOOTSTRAP_TOKEN,
-            'X-Tenant': ISSUER_TENANT,
+            ...(tenant ? { 'X-Tenant': tenant } : {}),
             'X-Forwarded-Proto': protocol.replace(':', ''),
             'X-Forwarded-Host': host,
           },
@@ -622,8 +648,14 @@ const regularServer = http.createServer((req, res) => {
 const mtlsServer = https.createServer(
   { key: tlsKey, cert: tlsCert, requestCert: true, rejectUnauthorized: false },
   (req, res) => {
+    // Origin real del tenant, propagado por query param desde la landing page
+    // (R-5): este server no tiene Host de tenant propio (puerto directo 3444),
+    // así que LANDING_ORIGIN solo es fallback para llamadas sin el param.
+    const reqUrl = new URL(req.url, `https://localhost:${MTLS_PORT}`);
+    const targetOrigin = reqUrl.searchParams.get('origin') || LANDING_ORIGIN;
+
     // Allow the landing page to embed this in an iframe
-    res.setHeader('Access-Control-Allow-Origin', LANDING_ORIGIN);
+    res.setHeader('Access-Control-Allow-Origin', targetOrigin);
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -640,7 +672,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_NO_CERT' },
-    '${LANDING_ORIGIN}'
+    ${JSON.stringify(targetOrigin)}
   );
 </script>
 </body></html>`);
@@ -655,7 +687,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_ERROR', error: 'Error al procesar el certificado digital' },
-    '${LANDING_ORIGIN}'
+    ${JSON.stringify(targetOrigin)}
   );
 </script>
 </body></html>`);
@@ -668,7 +700,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_SUCCESS', data: ${certDataJSON} },
-    '${LANDING_ORIGIN}'
+    ${JSON.stringify(targetOrigin)}
   );
 </script>
 </body></html>`);

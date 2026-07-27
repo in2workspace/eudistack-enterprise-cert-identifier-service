@@ -36,9 +36,21 @@ Variables de entorno:
 | `MTLS_PORT` | `3444` | Puerto mTLS |
 | `FRONTEND_ORIGIN` | `http://localhost:3000` | Origen permitido para `postMessage` |
 | `BOOTSTRAP_TOKEN` | *(hardcoded en `api/bootstrap.js`)* | Token de bootstrap del issuer |
+| `ISSUER_URL` | *(resuelto por petición, ver abajo)* | Override explícito de la URL del issuer; déjalo vacío salvo topologías no estándar |
+| `ISSUER_TENANT` | *(resuelto por petición, ver abajo)* | Override explícito de tenant; déjalo vacío salvo que el Host no traiga subdominio |
+
+`server/cert-server.mjs` resuelve **tenant e issuer por petición** desde el `Host` con el
+que el navegador llamó a este servicio (mismo algoritmo que `resolveTenantIdentity()` del
+frontend: primer segmento del hostname) — así una única instancia sirve correctamente
+cualquier subdominio de tenant, en vez de asumir siempre `cgcom` (fix multi-tenant,
+`fix/multi-tenant-issuer-redirect`).
 
 ## ⚠️ Deuda conocida (heredada de la demo)
 
+- **`api/bootstrap.js` (variante Vercel) sigue con `ISSUER_URL`/`credential_configuration_id`
+  hardcodeados a CGCOM** — no se ha tocado en el fix multi-tenant de `server/cert-server.mjs`
+  porque no forma parte del flujo Docker Compose/nginx (el `Dockerfile` solo empaqueta
+  `server/cert-server.mjs`); revisar si sigue en uso antes de darlo por consistente.
 - **`api/bootstrap.js` lleva un `BOOTSTRAP_TOKEN` hardcodeado** como fallback. Debe moverse
   a variable de entorno / secreto antes de cualquier uso no-demo.
 - `server/certs/*.key` está en `.gitignore`. El `.crt`/`.ca` se versionan por comodidad de demo;
