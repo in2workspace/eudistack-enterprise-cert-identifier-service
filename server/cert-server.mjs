@@ -49,6 +49,18 @@ const ALLOWED_ORIGINS = new Set([
   'http://localhost:3001',
 ]);
 
+/**
+ * Host público real (con puerto) de la petición entrante. nginx setea `Host`
+ * con `$host` (SIN puerto) pero `X-Forwarded-Host` con `$http_host` (CON
+ * puerto) — hay que preferir este último o cualquier URL construida a partir
+ * de él (X-Forwarded-Host hacia el issuer, credential-offer, wallet callback)
+ * pierde el puerto en cualquier setup que no use el 443/80 por defecto (dev
+ * local en :4443), rompiendo la wallet aunque el tenant se resuelva bien.
+ */
+function requestHost(req) {
+  return req.headers['x-forwarded-host'] || req.headers.host;
+}
+
 /** Primer segmento del hostname (sin puerto), en minúsculas — mismo algoritmo que resolveTenantIdentity() del frontend (AD-3). */
 function resolveTenantFromHost(host) {
   if (!host) return null;
@@ -57,10 +69,69 @@ function resolveTenantFromHost(host) {
   return segments.length >= 2 && segments[0].length > 0 ? segments[0] : null;
 }
 
+/** Organización "mandataria" (empleador) por tenant — mismos valores que EMPLOYEE_DEMO_PROFILE en eudistack-cgcom-mfe-cert-identifier, para que la credencial emitida coincida con lo que vio el titular en pantalla. */
+const EMPLOYEE_MANDATOR_BY_TENANT = {
+  calidalia: {
+    commonName: 'Gallo',
+    organization: 'Gallo',
+    organizationIdentifier: 'VATES-Q2802224G',
+    serialNumber: 'Q2802224G',
+    email: 'info@gallo.es',
+  },
+};
+
+const DEFAULT_EMPLOYEE_MANDATOR = {
+  commonName: 'Altia Consultoría y Tecnología',
+  organization: 'Altia Consultoría y Tecnología',
+  organizationIdentifier: 'VATES-A15726083',
+  serialNumber: 'A15726083',
+  email: 'info@altia.es',
+};
+
+/**
+ * Payload `learcredential.employee.sd.1` (mandate.mandator/mandatee/power) —
+ * todo tenant que no sea CGCOM emite esta credencial LEARCredentialEmployee
+ * en vez de doctorid.sd.1 (que solo CGCOM tiene registrado en su
+ * tenant_credential_profile, postgres/seed-tenants.sql). El backend del
+ * Issuer envuelve el payload completo bajo "mandate" cuando
+ * credentialSubjectStrategy no es "direct" (GenericCredentialBuilder), así
+ * que aquí NO se anida bajo "mandate" — mandator/mandatee/power van al
+ * nivel superior del payload.
+ */
+function buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, tenant }) {
+  const mandator = EMPLOYEE_MANDATOR_BY_TENANT[tenant] || DEFAULT_EMPLOYEE_MANDATOR;
+
+  return {
+    credential_configuration_id: 'learcredential.employee.sd.1',
+    payload: {
+      mandator: {
+        commonName: mandator.commonName,
+        country: 'ES',
+        email: mandator.email,
+        organization: mandator.organization,
+        organizationIdentifier: mandator.organizationIdentifier,
+        serialNumber: mandator.serialNumber,
+      },
+      mandatee: {
+        employeeId: userData.collegiateNumber || '20240001',
+        email,
+        firstName,
+        lastName,
+      },
+      power: [
+        { domain: 'DOME', function: 'Onboarding', action: 'Execute', type: 'Domain' },
+      ],
+    },
+    delivery: 'ui',
+    email,
+    grant_type: 'authorization_code',
+  };
+}
+
 /** Origin same-origin de la petición entrante (protocolo real vía X-Forwarded-Proto detrás de nginx). */
 function resolveRequestOrigin(req) {
   const proto = req.headers['x-forwarded-proto'] || 'https';
-  return `${proto}://${req.headers.host}`;
+  return `${proto}://${requestHost(req)}`;
 }
 
 // ─── Certificate management ─────────────────────────────────────────────────
@@ -545,38 +616,59 @@ const regularServer = http.createServer((req, res) => {
         const nameParts = (userData.name || '').trim().split(' ');
         const firstName = nameParts[0] || 'María';
         const lastName = nameParts.slice(1).join(' ') || 'García López';
+        const email = userData.email || 'maria.garcia@cgcom.es';
 
-        const bootstrapPayload = {
-          credential_configuration_id: 'doctorid.sd.1',
-          payload: {
-            firstName,
-            lastName,
-            registrationNumber: userData.collegiateNumber || '282801234',
-            nationalId: userData.dni || '12345678A',
-            provincialBoard: 'COM Barcelona',
-            specialty: 'Medicina Interna',
-            email: userData.email || 'maria.garcia@cgcom.es',
-            country: 'ES',
-          },
-          delivery: 'ui',
-          email: userData.email || 'maria.garcia@cgcom.es',
-          grant_type: 'authorization_code',
-        };
+        // credential_configuration_id por tenant (R-6): solo CGCOM tiene
+        // 'doctorid.sd.1' registrado en su tenant_credential_profile
+        // (postgres/seed-tenants.sql) — el resto de tenants (calidalia,
+        // dome, kpmg, sandbox...) solo tienen 'learcredential.employee.sd.1'.
+        // Enviar doctorid.sd.1 a un tenant sin ese perfil hace que el Issuer
+        // rechace el bootstrap, rompiendo "añadir credencial" para cualquier
+        // tenant que no sea CGCOM.
+        const tenantForPayload = resolveTenantFromHost(requestHost(req)) || ISSUER_TENANT_OVERRIDE;
+        const bootstrapPayload =
+          tenantForPayload === 'cgcom'
+            ? {
+                credential_configuration_id: 'doctorid.sd.1',
+                payload: {
+                  firstName,
+                  lastName,
+                  registrationNumber: userData.collegiateNumber || '282801234',
+                  nationalId: userData.dni || '12345678A',
+                  provincialBoard: 'COM Barcelona',
+                  specialty: 'Medicina Interna',
+                  email,
+                  country: 'ES',
+                },
+                delivery: 'ui',
+                email,
+                grant_type: 'authorization_code',
+              }
+            : buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, tenant: tenantForPayload });
 
-        // Tenant e issuer se resuelven por petición desde el Host con el que
-        // el navegador llamó a este servicio — mismo tenant que la pantalla que
-        // disparó el bootstrap, nunca un valor fijo (R-5, bug con tenant "dome").
-        const tenant = resolveTenantFromHost(req.headers.host) || ISSUER_TENANT_OVERRIDE;
+        // Tenant, issuer y X-Forwarded-* se resuelven por petición desde el Host
+        // con el que el navegador llamó a este servicio — mismo tenant que la
+        // pantalla que disparó el bootstrap, nunca un valor fijo (R-5, bug con
+        // tenant "dome"/"calidalia"). ISSUER_URL apunta al servicio interno de
+        // Docker (bypassa nginx), así que el Issuer solo puede saber el host
+        // público real (para las URLs que embebe en la credential offer: token
+        // endpoint, credential endpoint, wallet callback) a través de estos
+        // X-Forwarded-* — usar el FRONTEND_ORIGIN estático aquí generaba una
+        // credential offer con URLs de cgcom aunque el tenant bootstrapeado
+        // (X-Tenant) fuera el correcto, rompiendo la wallet en cualquier otro
+        // tenant.
+        const tenant = tenantForPayload;
         const issuerUrl = ISSUER_URL_OVERRIDE || `${resolveRequestOrigin(req)}/issuer/api/v1/bootstrap`;
-        const { protocol, host } = new URL(FRONTEND_ORIGIN);
+        const forwardedProto = req.headers['x-forwarded-proto'] || 'https';
+        const forwardedHost = requestHost(req) || new URL(FRONTEND_ORIGIN).host;
         const issuerRes = await fetch(issuerUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Bootstrap-Token': BOOTSTRAP_TOKEN,
             ...(tenant ? { 'X-Tenant': tenant } : {}),
-            'X-Forwarded-Proto': protocol.replace(':', ''),
-            'X-Forwarded-Host': host,
+            'X-Forwarded-Proto': forwardedProto,
+            'X-Forwarded-Host': forwardedHost,
           },
           body: JSON.stringify(bootstrapPayload),
           signal: AbortSignal.timeout(10_000),
