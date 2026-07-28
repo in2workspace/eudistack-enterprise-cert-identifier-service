@@ -125,8 +125,12 @@ function buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, t
         nationalId: userData.dni || '12345678A',
         jobTitle: userData.specialty || '',
       },
+      // domain must equal the tenant (mfe-credential-manager's AuthService.hasPower()
+      // requires power.domain === the tenant resolved from the hostname to grant
+      // access — a fixed 'DOME' domain here rejected every non-DOME tenant's login
+      // to the Issuer with "session scoped to a different tenant").
       power: [
-        { domain: 'DOME', function: 'Onboarding', action: 'Execute', type: 'Domain' },
+        { domain: tenant, function: 'Onboarding', action: 'Execute', type: 'Domain' },
       ],
     },
     delivery: 'ui',
