@@ -117,9 +117,21 @@ function buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, t
         email,
         firstName,
         lastName,
+        // additionalProperty (schema allows additionalProperties: true) — the
+        // Verifier embeds the whole mandatee object in the id_token
+        // (id_token_embed: "mandate.mandatee"), so it travels through to
+        // "Datos del Empleado" after a later OIDC login with this credential.
+        // jobTitle/Puesto is intentionally NOT sourced from here — it's a
+        // per-tenant hardcoded display value in oidc.service.ts, not part of
+        // the credential (demo data, not a real HR system).
+        nationalId: userData.dni || '12345678A',
       },
+      // domain must equal the tenant (mfe-credential-manager's AuthService.hasPower()
+      // requires power.domain === the tenant resolved from the hostname to grant
+      // access — a fixed 'DOME' domain here rejected every non-DOME tenant's login
+      // to the Issuer with "session scoped to a different tenant").
       power: [
-        { domain: 'DOME', function: 'Onboarding', action: 'Execute', type: 'Domain' },
+        { domain: tenant, function: 'Onboarding', action: 'Execute', type: 'Domain' },
       ],
     },
     delivery: 'ui',
