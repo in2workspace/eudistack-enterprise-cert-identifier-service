@@ -117,6 +117,13 @@ function buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, t
         email,
         firstName,
         lastName,
+        // additionalProperties: true en el schema — no forman parte del modelo
+        // LEARCredentialEmployee estándar, pero el Verifier embebe el objeto
+        // mandatee completo en el id_token (id_token_embed: "mandate.mandatee"),
+        // así que viajan igual hasta la pantalla "Datos del Empleado" tras un
+        // login OIDC posterior con esta misma credencial.
+        nationalId: userData.dni || '12345678A',
+        jobTitle: userData.specialty || '',
       },
       power: [
         { domain: 'DOME', function: 'Onboarding', action: 'Execute', type: 'Domain' },
