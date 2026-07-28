@@ -117,13 +117,14 @@ function buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, t
         email,
         firstName,
         lastName,
-        // additionalProperties: true en el schema — no forman parte del modelo
-        // LEARCredentialEmployee estándar, pero el Verifier embebe el objeto
-        // mandatee completo en el id_token (id_token_embed: "mandate.mandatee"),
-        // así que viajan igual hasta la pantalla "Datos del Empleado" tras un
-        // login OIDC posterior con esta misma credencial.
+        // additionalProperty (schema allows additionalProperties: true) — the
+        // Verifier embeds the whole mandatee object in the id_token
+        // (id_token_embed: "mandate.mandatee"), so it travels through to
+        // "Datos del Empleado" after a later OIDC login with this credential.
+        // jobTitle/Puesto is intentionally NOT sourced from here — it's a
+        // per-tenant hardcoded display value in oidc.service.ts, not part of
+        // the credential (demo data, not a real HR system).
         nationalId: userData.dni || '12345678A',
-        jobTitle: userData.specialty || '',
       },
       // domain must equal the tenant (mfe-credential-manager's AuthService.hasPower()
       // requires power.domain === the tenant resolved from the hostname to grant
