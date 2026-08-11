@@ -397,7 +397,7 @@ const tlsKey = readFileSync(path.join(CERTS_DIR, 'server.key'));
 const tlsCert = readFileSync(path.join(CERTS_DIR, 'server.crt'));
 
 // ─── Server 1: HTTP (behind ALB/nginx) — port 8080 ─────────────────────────
-// Serves the popup landing page and API endpoints under /identify/*.
+// Serves the popup landing page and API endpoints under /issuance-portal/*.
 // TLS is terminated by the ALB/nginx; this server speaks plain HTTP.
 
 function corsHeaders(res, req) {
@@ -420,7 +420,7 @@ const regularServer = http.createServer((req, res) => {
   }
 
   // ── Popup landing page with iframe to mTLS server ───────────────────────
-  if (req.url === '/identify/api/cert-auth' || req.url?.startsWith('/identify/api/cert-auth?')) {
+  if (req.url === '/issuance-portal/api/cert-auth' || req.url?.startsWith('/issuance-portal/api/cert-auth?')) {
     const reqUrl = new URL(req.url, 'http://localhost');
     const openerOrigin = reqUrl.searchParams.get('origin') || FRONTEND_ORIGIN;
 
@@ -619,7 +619,7 @@ const regularServer = http.createServer((req, res) => {
   }
 
   // ── Bootstrap endpoint (proxy al issuer CGCOM) ─────────────────────────
-  if (req.url === '/identify/api/bootstrap' && req.method === 'POST') {
+  if (req.url === '/issuance-portal/api/bootstrap' && req.method === 'POST') {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', async () => {
@@ -711,7 +711,7 @@ const regularServer = http.createServer((req, res) => {
   }
 
   // ── Health check ───────────────────────────────────────────────────────
-  if (req.url === '/identify/health' || req.url === '/health') {
+  if (req.url === '/issuance-portal/health' || req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'UP' }));
     return;
@@ -822,7 +822,7 @@ regularServer.listen(PORT, () => {
   console.log(`\n  Servidor de Certificados CGCOM`);
   console.log(`  HTTP:     http://localhost:${PORT}  (behind nginx/ALB)`);
   console.log(`  mTLS:     https://localhost:${MTLS_PORT}  (direct, browser port mapping)`);
-  console.log(`  Popup:    ${LANDING_ORIGIN}/identify/api/cert-auth`);
+  console.log(`  Popup:    ${LANDING_ORIGIN}/issuance-portal/api/cert-auth`);
   console.log(`  Frontend: ${FRONTEND_ORIGIN}`);
 });
 
