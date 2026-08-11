@@ -5,7 +5,7 @@ on:
 
 env:
   PROJECT_NAME: eudistack
-  APP_NAME: identify
+  APP_NAME: issuance-portal
   REGION_CODE: ew1
 
 permissions:
