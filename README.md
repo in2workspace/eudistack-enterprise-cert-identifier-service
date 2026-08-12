@@ -1,4 +1,4 @@
-# eudistack-cgcom-cert-identifier-service
+# eudistack-cert-identifier-service
 
 Backend del **Portal de Identificación con certificado FNMT** de CGCOM.
 
