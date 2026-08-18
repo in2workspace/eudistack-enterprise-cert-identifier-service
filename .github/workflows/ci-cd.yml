@@ -84,6 +84,26 @@ jobs:
           fi
           echo "Release ${TAG} does not exist — proceeding."
 
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate CycloneDX SBOM
+        run: npm run sbom
+
+      - name: Upload SBOM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-v${{ env.VERSION }}
+          path: build/sbom/sbom.json
+          retention-days: 90
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -116,6 +136,25 @@ jobs:
           docker push "${ECR_LATEST}"
           docker push "${ECR_VERSION}"
           docker push "${ECR_SHA}"
+
+      - name: Prepare SBOM Release Asset
+        run: |
+          set -euo pipefail
+          TAG="v${{ env.VERSION }}"
+          cp build/sbom/sbom.json "./sbom-${TAG}.cdx.json"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ env.VERSION }}"
+          gh release create "${TAG}" \
+            "./sbom-${TAG}.cdx.json#CycloneDX SBOM (${TAG})" \
+            --repo "${{ github.repository }}" \
+            --title "${TAG}" \
+            --generate-notes
+          echo "### 🏷️ GitHub Release published: ${TAG} with attached SBOM" >> $GITHUB_STEP_SUMMARY
   cd-stg:
     name: Deploy to Staging
     needs: ci
