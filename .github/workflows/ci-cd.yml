@@ -9,6 +9,8 @@ on:
       - 'docs/**'
       - 'LICENSE'
       - '.gitignore'
+      # Editing the Trivy allow-list is a policy change, never a deployment
+      - 'config/trivy/**'
   workflow_dispatch:
 
 env:
@@ -40,6 +42,22 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          npx --yes @cyclonedx/cyclonedx-npm@6.0.1 \
+            --package-lock-only \
+            --omit dev \
+            --output-format JSON \
+            --output-file sbom.cdx.json \
+            --validate
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ github.sha }}
+          path: sbom.cdx.json
+          retention-days: 90
 
       - name: SonarCloud Scan
         uses: SonarSource/sonarqube-scan-action@v5
