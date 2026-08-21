@@ -70,3 +70,62 @@ jobs:
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # --- Software composition analysis (SCA) ---
+      # Trivy reads package-lock.json. Its npm parser omits dev dependencies by
+      # default, so the scan reflects what actually ships to the browser.
+      #
+      # exit-code is 0 ON PURPOSE: this lands as a baseline, not yet a gate. The
+      # production dependency tree carries HIGH advisories in @angular/common,
+      # @angular/core and @angular/compiler. A patch bump to 19.2.25 (the last
+      # 19.x release) closes CVE-2026-50170 and CVE-2026-50171; the remaining six
+      # (CVE-2026-54266, 54267, 54268, 68945 and 69151) are only fixed in
+      # 20.3.25+, 21.2.17+ or 22.x, so clearing the tree needs the Angular major
+      # upgrade. Flip exit-code to '1' once that lands, or once the accepted risks
+      # are listed in config/trivy/.trivyignore.
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Trivy vulnerability DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: ${{ runner.os }}-trivy-db-${{ steps.date.outputs.date }}
+          restore-keys: |
+            ${{ runner.os }}-trivy-db-
+
+      - name: Trivy Dependency Scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+          ignore-unfixed: true
+          format: 'table'
+          cache-dir: '~/.cache/trivy'
+          trivyignores: 'config/trivy/.trivyignore'
+
+      - name: Trivy Report (JSON)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+          ignore-unfixed: true
+          format: 'json'
+          output: 'trivy-report.json'
+          cache-dir: '~/.cache/trivy'
+          trivyignores: 'config/trivy/.trivyignore'
+
+      - name: Upload Trivy Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.json
