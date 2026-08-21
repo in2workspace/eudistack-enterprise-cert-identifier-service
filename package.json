@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server/cert-server.mjs",
     "cert-server": "node server/cert-server.mjs",
-    "sbom": "cyclonedx-npm --spec-version 1.6 --output-format JSON --output-file build/sbom/sbom.json --package-lock-only --output-reproducible --ignore-npm-errors"
+    "sbom": "cyclonedx-npm --spec-version 1.6 --output-format JSON --output-file build/sbom/sbom.json --package-lock-only --output-reproducible"
   },
   "dependencies": {
     "node-forge": "^1.3.3"
