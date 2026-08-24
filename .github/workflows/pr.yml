@@ -70,3 +70,113 @@ jobs:
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # --- Software composition analysis (SCA) ---
+      # Trivy reads package-lock.json. Its npm parser omits dev dependencies by
+      # default, so the scan reflects what actually ships to the browser.
+      #
+      # exit-code is 0 ON PURPOSE: this lands as a baseline, not yet a gate. The
+      # production dependency tree carries HIGH advisories in @angular/common,
+      # @angular/core and @angular/compiler. A patch bump to 19.2.25 (the last
+      # 19.x release) closes CVE-2026-50170 and CVE-2026-50171; the remaining six
+      # (CVE-2026-54266, 54267, 54268, 68945 and 69151) are only fixed in
+      # 20.3.25+, 21.2.17+ or 22.x, so clearing the tree needs the Angular major
+      # upgrade. Flip exit-code to '1' once that lands, or once the accepted risks
+      # are listed in config/trivy/.trivyignore.
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Trivy vulnerability DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: ${{ runner.os }}-trivy-db-${{ steps.date.outputs.date }}
+          restore-keys: |
+            ${{ runner.os }}-trivy-db-
+
+      - name: Trivy Dependency Scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+          ignore-unfixed: true
+          format: 'table'
+          cache-dir: '~/.cache/trivy'
+          trivyignores: 'config/trivy/.trivyignore'
+
+      - name: Trivy Report (JSON)
+        if: always()
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          scanners: 'vuln'
+          severity: 'HIGH,CRITICAL'
+          exit-code: '0'
+          ignore-unfixed: true
+          format: 'json'
+          output: 'trivy-report.json'
+          cache-dir: '~/.cache/trivy'
+          trivyignores: 'config/trivy/.trivyignore'
+
+      - name: Upload Trivy Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: trivy-report.json
+
+  dast-baseline:
+    name: ZAP DAST Baseline
+    needs: [changes, build]
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    runs-on: ubuntu-latest
+    # G2 (conv-infrastructure-testing.md §6.3): passive scan, non-blocking.
+    # WARN-level findings are surfaced only via the uploaded HTML report.
+    # Only CERT_PORT (plain HTTP, 8080) is scanned — MTLS_PORT (3444) requires a
+    # client certificate handshake, out of scope for a passive DAST baseline.
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t eudistack-enterprise-cert-identifier-service:pr .
+
+      - name: Run container
+        run: |
+          docker run -d --name cert-identifier-service \
+            --network host \
+            -e CERT_PORT=8080 \
+            eudistack-enterprise-cert-identifier-service:pr
+
+      - name: Wait for service health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/health; then exit 0; fi
+            sleep 2
+          done
+          echo "Service did not become healthy in time"
+          docker logs cert-identifier-service
+          exit 1
+
+      # Rules file: dev-tools/testing/zap/zap-baseline.conf (this repo), vendored
+      # from eudistack-platform-dev's dev-tools/testing/baseline/zap/zap-baseline.conf
+      # (single source of truth per convention §5.3) — copied here to avoid a
+      # cross-repo read token. Update the source there, then re-copy here.
+      #
+      # Target uses sandbox.localtest.me (resolves to 127.0.0.1 publicly) instead
+      # of "localhost": resolveTenantFromHost() in cert-server.mjs requires a
+      # hostname with >=2 dot-separated segments to resolve a tenant — a bare
+      # "localhost" host always resolves to null, regardless of any header.
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: 'http://sandbox.localtest.me:8080'
+          rules_file_name: 'dev-tools/testing/zap/zap-baseline.conf'
+          artifact_name: 'zap-report'
+          fail_action: false
+          allow_issue_writing: false
