@@ -30,12 +30,11 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Verify the license gate itself
+        run: node --test .github/scripts/license-gate.test.mjs
+
       - name: Generate CycloneDX SBOM
         run: npm run sbom
 
-      - name: Run License Gate
-        uses: in2workspace/eudistack-platform-dev/.github/actions/license-gate@license-gate-v1.0.0
-        with:
-          sbom-path: build/sbom/sbom.json
-          policy-path: .github/license-policy.json
-          exceptions-path: .github/license-exceptions.json
+      - name: Evaluate licenses
+        run: node .github/scripts/license-gate.mjs --sbom-path build/sbom/sbom.json
