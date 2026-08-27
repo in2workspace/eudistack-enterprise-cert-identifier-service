@@ -1,0 +1,40 @@
+name: License Gate
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  license-gate:
+    name: License Compliance Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Verify the license gate itself
+        run: node --test .github/scripts/license-gate.test.mjs
+
+      - name: Generate CycloneDX SBOM
+        run: npm run sbom
+
+      - name: Evaluate licenses
+        run: node .github/scripts/license-gate.mjs --sbom-path build/sbom/sbom.json
