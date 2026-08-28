@@ -1,6 +1,6 @@
 {
   "name": "eudistack-enterprise-cert-identifier-service",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Backend de Identificación con certificado FNMT (CGCOM) — cert-server mTLS + proxy de bootstrap al issuer. Material de demo extraído de demo-cgcom.",
   "type": "module",
