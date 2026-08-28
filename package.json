@@ -1,14 +1,18 @@
 {
   "name": "eudistack-enterprise-cert-identifier-service",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "description": "Backend de Identificación con certificado FNMT (CGCOM) — cert-server mTLS + proxy de bootstrap al issuer. Material de demo extraído de demo-cgcom.",
   "type": "module",
   "scripts": {
     "start": "node server/cert-server.mjs",
-    "cert-server": "node server/cert-server.mjs"
+    "cert-server": "node server/cert-server.mjs",
+    "sbom": "cyclonedx-npm --spec-version 1.6 --output-format JSON --output-file build/sbom/sbom.json --package-lock-only --output-reproducible"
   },
   "dependencies": {
     "node-forge": "^1.3.3"
+  },
+  "devDependencies": {
+    "@cyclonedx/cyclonedx-npm": "6.0.1"
   }
 }
