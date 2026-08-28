@@ -53,7 +53,7 @@ jobs:
             --validate
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-${{ github.sha }}
           path: sbom.cdx.json
@@ -116,7 +116,7 @@ jobs:
         run: npm run sbom
 
       - name: Upload SBOM Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom-v${{ env.VERSION }}
           path: build/sbom/sbom.json
