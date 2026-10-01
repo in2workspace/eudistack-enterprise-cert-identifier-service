@@ -12,6 +12,15 @@ on:
       # Editing the Trivy allow-list is a policy change, never a deployment
       - 'config/trivy/**'
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to build and deploy
+        type: choice
+        options:
+          - stg
+          - dev
+        default: stg
+        required: true
 
 env:
   PROJECT_NAME: eudistack
@@ -73,7 +82,7 @@ jobs:
 
   ci-dev:
     name: Build > Tag > Push (Dev)
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.environment == 'dev')
     needs: sonar
     runs-on: ubuntu-latest
     environment:
@@ -168,7 +177,7 @@ jobs:
 
   ci:
     name: Build > Tag > Push
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.environment == 'stg'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.metadata.outputs.version }}
