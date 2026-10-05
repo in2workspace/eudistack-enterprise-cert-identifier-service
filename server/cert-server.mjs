@@ -14,6 +14,10 @@
  * when the user dismisses the certificate-selection dialog, which prevented
  * the popup page from loading and sending postMessage back to the portal.
  *
+ * The landing page works both as a popup (window.opener) and embedded as a
+ * hidden iframe in the portal (window.parent); results are posted to whichever
+ * applies, so the portal can show the browser's certificate selector directly.
+ *
  * Usage:
  *   node server/cert-server.mjs
  */
@@ -437,8 +441,8 @@ const regularServer = http.createServer((req, res) => {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
 <script>
-  if (window.opener) {
-    window.opener.postMessage(
+  if (window.opener || window.parent !== window) {
+    (window.opener || window.parent).postMessage(
       { type: 'CERT_AUTH_ERROR', error: 'Error al procesar el certificado digital' },
       ${JSON.stringify(openerOrigin)}
     );
@@ -465,8 +469,8 @@ const regularServer = http.createServer((req, res) => {
     <p><span class="spinner"></span></p>
   </div>
   <script>
-    if (window.opener) {
-      window.opener.postMessage(
+    if (window.opener || window.parent !== window) {
+      (window.opener || window.parent).postMessage(
         { type: 'CERT_AUTH_SUCCESS', data: ${certDataJSON} },
         ${JSON.stringify(openerOrigin)}
       );
@@ -481,8 +485,8 @@ const regularServer = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
 <script>
-  if (window.opener) {
-    window.opener.postMessage(
+  if (window.opener || window.parent !== window) {
+    (window.opener || window.parent).postMessage(
       { type: 'CERT_AUTH_ERROR', error: 'Error interno al leer el certificado' },
       ${JSON.stringify(openerOrigin)}
     );
@@ -533,6 +537,13 @@ const regularServer = http.createServer((req, res) => {
     const MTLS = '${MTLS_ORIGIN}';
     let resolved = false;
 
+    // Embedded mode (hidden iframe in the portal, no popup): tell the portal the
+    // landing loaded and the mTLS handshake is in progress, so it keeps waiting
+    // for the user's certificate selection instead of treating the load as a failure.
+    if (!window.opener && window.parent !== window) {
+      window.parent.postMessage({ type: 'CERT_AUTH_PENDING' }, FRONTEND);
+    }
+
     // Listen for postMessage from the mTLS iframe
     window.addEventListener('message', (event) => {
       if (event.origin !== MTLS) return;
@@ -546,8 +557,8 @@ const regularServer = http.createServer((req, res) => {
           '<p>Enviando datos al portal...</p>' +
           '<p><span class="spinner"></span></p>';
 
-        if (window.opener) {
-          window.opener.postMessage(
+        if (window.opener || window.parent !== window) {
+          (window.opener || window.parent).postMessage(
             { type: 'CERT_AUTH_SUCCESS', data: event.data.data },
             FRONTEND
           );
@@ -561,8 +572,8 @@ const regularServer = http.createServer((req, res) => {
           '(ej: FNMT) y de seleccionarlo cuando el navegador lo solicite.</p>' +
           '<button class="retry-btn" onclick="retry()">Reintentar</button>';
 
-        if (window.opener) {
-          window.opener.postMessage(
+        if (window.opener || window.parent !== window) {
+          (window.opener || window.parent).postMessage(
             { type: 'CERT_AUTH_ERROR', error: 'No se ha proporcionado certificado' },
             FRONTEND
           );
@@ -573,8 +584,8 @@ const regularServer = http.createServer((req, res) => {
           '<p class="error">' + (event.data.error || 'Error al procesar el certificado') + '</p>' +
           '<button class="retry-btn" onclick="retry()">Reintentar</button>';
 
-        if (window.opener) {
-          window.opener.postMessage(
+        if (window.opener || window.parent !== window) {
+          (window.opener || window.parent).postMessage(
             { type: 'CERT_AUTH_ERROR', error: event.data.error || 'Error al procesar el certificado' },
             FRONTEND
           );
@@ -595,8 +606,8 @@ const regularServer = http.createServer((req, res) => {
         'o que hayas cancelado la selección.</p>' +
         '<button class="retry-btn" onclick="retry()">Reintentar</button>';
 
-      if (window.opener) {
-        window.opener.postMessage(
+      if (window.opener || window.parent !== window) {
+        (window.opener || window.parent).postMessage(
           { type: 'CERT_AUTH_ERROR', error: 'No se pudo completar la lectura del certificado. Verifica que tienes un certificado digital instalado.' },
           FRONTEND
         );
