@@ -144,6 +144,39 @@ function buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, t
   };
 }
 
+const FRONTEND_URL = new URL(FRONTEND_ORIGIN);
+/** Dominio padre de los subdominios de tenant (cgcom.stg.eudistack.net → stg.eudistack.net). */
+const TENANT_PARENT_DOMAIN = FRONTEND_URL.hostname.split('.').slice(1).join('.');
+
+/**
+ * Origen de confianza al que se publican los datos del certificado
+ * (targetOrigin de postMessage y frame-ancestors). El `?origin=` recibido solo
+ * se acepta si es un origen estático conocido o un subdominio de tenant hermano
+ * de FRONTEND_ORIGIN (mismo esquema, dominio padre y puerto); si no, se usa
+ * `fallback`. Sin esta validación, una web ajena podría embeber cert-auth con
+ * `?origin=<atacante>` y recibir el certificado del usuario.
+ */
+function resolveTrustedOrigin(candidate, fallback = FRONTEND_ORIGIN) {
+  if (!candidate) return fallback;
+  if (ALLOWED_ORIGINS.has(candidate)) return candidate;
+
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    return fallback;
+  }
+  const [label, ...parent] = url.hostname.split('.');
+  const isTenantSibling =
+    url.origin === candidate &&
+    url.protocol === FRONTEND_URL.protocol &&
+    url.port === FRONTEND_URL.port &&
+    TENANT_PARENT_DOMAIN.includes('.') &&
+    parent.join('.') === TENANT_PARENT_DOMAIN &&
+    /^[a-z0-9-]+$/.test(label);
+  return isTenantSibling ? candidate : fallback;
+}
+
 /** Origin same-origin de la petición entrante (protocolo real vía X-Forwarded-Proto detrás de nginx). */
 function resolveRequestOrigin(req) {
   const proto = req.headers['x-forwarded-proto'] || 'https';
@@ -426,7 +459,9 @@ const regularServer = http.createServer((req, res) => {
   // ── Popup landing page with iframe to mTLS server ───────────────────────
   if (req.url === '/issuance-portal/api/cert-auth' || req.url?.startsWith('/issuance-portal/api/cert-auth?')) {
     const reqUrl = new URL(req.url, 'http://localhost');
-    const openerOrigin = reqUrl.searchParams.get('origin') || FRONTEND_ORIGIN;
+    const openerOrigin = resolveTrustedOrigin(reqUrl.searchParams.get('origin'));
+    // Solo el portal de confianza puede embeber esta página (modo iframe).
+    res.setHeader('Content-Security-Policy', `frame-ancestors ${openerOrigin}`);
 
     // ── ALB mTLS mode (STG): cert delivered via header ────────────────────
     const albCertPem = req.headers['x-amzn-mtls-clientcert'];
@@ -533,7 +568,7 @@ const regularServer = http.createServer((req, res) => {
   <iframe id="mtls-frame" src="${MTLS_ORIGIN}/cert-auth?origin=${encodeURIComponent(openerOrigin)}"></iframe>
 
   <script>
-    const FRONTEND = '${openerOrigin}';
+    const FRONTEND = ${JSON.stringify(openerOrigin)};
     const MTLS = '${MTLS_ORIGIN}';
     let resolved = false;
 
@@ -765,12 +800,17 @@ const mtlsServer = https.createServer(
   (req, res) => {
     // Origin real del tenant, propagado por query param desde la landing page
     // (R-5): este server no tiene Host de tenant propio (puerto directo 3444),
-    // así que LANDING_ORIGIN solo es fallback para llamadas sin el param.
+    // así que LANDING_ORIGIN es el fallback para llamadas sin el param o con
+    // un origen no permitido (resolveTrustedOrigin).
     const reqUrl = new URL(req.url, `https://localhost:${MTLS_PORT}`);
-    const targetOrigin = reqUrl.searchParams.get('origin') || LANDING_ORIGIN;
+    const targetOrigin = resolveTrustedOrigin(reqUrl.searchParams.get('origin'), LANDING_ORIGIN);
 
-    // Allow the landing page to embed this in an iframe
+    // Allow the landing page (and the portal embedding it) to embed this in an iframe
     res.setHeader('Access-Control-Allow-Origin', targetOrigin);
+    res.setHeader(
+      'Content-Security-Policy',
+      `frame-ancestors ${[...new Set([targetOrigin, LANDING_ORIGIN])].join(' ')}`,
+    );
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
