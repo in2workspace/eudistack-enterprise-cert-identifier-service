@@ -32,6 +32,7 @@ import forge from 'node-forge';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createCertAuthOriginPolicy } from './cert-auth-origin.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CERTS_DIR = path.join(__dirname, 'certs');
@@ -52,6 +53,7 @@ const ALLOWED_ORIGINS = new Set([
   FRONTEND_ORIGIN,
   'http://localhost:3001',
 ]);
+const certAuthOrigins = createCertAuthOriginPolicy({ frontendOrigin: FRONTEND_ORIGIN, landingOrigin: LANDING_ORIGIN, staticOrigins: [...ALLOWED_ORIGINS] });
 
 /**
  * Host público real (con puerto) de la petición entrante. nginx setea `Host`
@@ -142,39 +144,6 @@ function buildEmployeeBootstrapPayload({ firstName, lastName, email, userData, t
     email,
     grant_type: 'authorization_code',
   };
-}
-
-const FRONTEND_URL = new URL(FRONTEND_ORIGIN);
-/** Dominio padre de los subdominios de tenant (cgcom.stg.eudistack.net → stg.eudistack.net). */
-const TENANT_PARENT_DOMAIN = FRONTEND_URL.hostname.split('.').slice(1).join('.');
-
-/**
- * Origen de confianza al que se publican los datos del certificado
- * (targetOrigin de postMessage y frame-ancestors). El `?origin=` recibido solo
- * se acepta si es un origen estático conocido o un subdominio de tenant hermano
- * de FRONTEND_ORIGIN (mismo esquema, dominio padre y puerto); si no, se usa
- * `fallback`. Sin esta validación, una web ajena podría embeber cert-auth con
- * `?origin=<atacante>` y recibir el certificado del usuario.
- */
-function resolveTrustedOrigin(candidate, fallback = FRONTEND_ORIGIN) {
-  if (!candidate) return fallback;
-  if (ALLOWED_ORIGINS.has(candidate)) return candidate;
-
-  let url;
-  try {
-    url = new URL(candidate);
-  } catch {
-    return fallback;
-  }
-  const [label, ...parent] = url.hostname.split('.');
-  const isTenantSibling =
-    url.origin === candidate &&
-    url.protocol === FRONTEND_URL.protocol &&
-    url.port === FRONTEND_URL.port &&
-    TENANT_PARENT_DOMAIN.includes('.') &&
-    parent.join('.') === TENANT_PARENT_DOMAIN &&
-    /^[a-z0-9-]+$/.test(label);
-  return isTenantSibling ? candidate : fallback;
 }
 
 /** Origin same-origin de la petición entrante (protocolo real vía X-Forwarded-Proto detrás de nginx). */
@@ -459,9 +428,8 @@ const regularServer = http.createServer((req, res) => {
   // ── Popup landing page with iframe to mTLS server ───────────────────────
   if (req.url === '/issuance-portal/api/cert-auth' || req.url?.startsWith('/issuance-portal/api/cert-auth?')) {
     const reqUrl = new URL(req.url, 'http://localhost');
-    const openerOrigin = resolveTrustedOrigin(reqUrl.searchParams.get('origin'));
-    // Solo el portal de confianza puede embeber esta página (modo iframe).
-    res.setHeader('Content-Security-Policy', `frame-ancestors ${openerOrigin}`);
+    // Origen validado + frame-ancestors: solo los portales de confianza pueden embeber esta página.
+    const openerOrigin = certAuthOrigins.guard(res, reqUrl.searchParams.get('origin'));
 
     // ── ALB mTLS mode (STG): cert delivered via header ────────────────────
     const albCertPem = req.headers['x-amzn-mtls-clientcert'];
@@ -801,16 +769,13 @@ const mtlsServer = https.createServer(
     // Origin real del tenant, propagado por query param desde la landing page
     // (R-5): este server no tiene Host de tenant propio (puerto directo 3444),
     // así que LANDING_ORIGIN es el fallback para llamadas sin el param o con
-    // un origen no permitido (resolveTrustedOrigin).
+    // un origen no permitido (cert-auth-origin.mjs). guard() fija además
+    // frame-ancestors para que solo la landing y el portal puedan embeberlo.
     const reqUrl = new URL(req.url, `https://localhost:${MTLS_PORT}`);
-    const targetOrigin = resolveTrustedOrigin(reqUrl.searchParams.get('origin'), LANDING_ORIGIN);
+    const targetOrigin = certAuthOrigins.guard(res, reqUrl.searchParams.get('origin'), LANDING_ORIGIN);
 
-    // Allow the landing page (and the portal embedding it) to embed this in an iframe
+    // Allow the landing page to embed this in an iframe
     res.setHeader('Access-Control-Allow-Origin', targetOrigin);
-    res.setHeader(
-      'Content-Security-Policy',
-      `frame-ancestors ${[...new Set([targetOrigin, LANDING_ORIGIN])].join(' ')}`,
-    );
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);

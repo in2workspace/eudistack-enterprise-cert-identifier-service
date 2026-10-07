@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node server/cert-server.mjs",
     "cert-server": "node server/cert-server.mjs",
+    "test": "node --test --experimental-test-coverage --test-coverage-include=server/** --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info \"test/**/*.test.mjs\"",
     "sbom": "cyclonedx-npm --spec-version 1.6 --output-format JSON --output-file build/sbom/sbom.json --package-lock-only --output-reproducible"
   },
   "dependencies": {
