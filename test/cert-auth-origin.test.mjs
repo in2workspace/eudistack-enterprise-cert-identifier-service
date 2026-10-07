@@ -1,14 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCertAuthOriginPolicy } from '../server/cert-auth-origin.mjs';
+import { createCertAuthOriginPolicy, parseOriginList } from '../server/cert-auth-origin.mjs';
 
 const STG = createCertAuthOriginPolicy({
   frontendOrigin: 'https://cgcom.stg.eudistack.net',
-  staticOrigins: ['http://localhost:3001'],
 });
 
 const LOCAL = createCertAuthOriginPolicy({
   frontendOrigin: 'https://cgcom.127.0.0.1.nip.io:4443',
+  staticOrigins: ['http://localhost:3001'],
 });
 
 const STANDALONE = createCertAuthOriginPolicy({
@@ -26,10 +26,14 @@ test('sin origin devuelve el fallback', () => {
   assert.equal(STG.resolveTrustedOrigin('', 'https://fallback.example'), 'https://fallback.example');
 });
 
-test('acepta FRONTEND_ORIGIN y los orígenes estáticos', () => {
+test('acepta FRONTEND_ORIGIN, LANDING_ORIGIN y los orígenes extra configurados', () => {
   assert.equal(STG.resolveTrustedOrigin('https://cgcom.stg.eudistack.net'), 'https://cgcom.stg.eudistack.net');
-  assert.equal(STG.resolveTrustedOrigin('http://localhost:3001'), 'http://localhost:3001');
   assert.equal(STANDALONE.resolveTrustedOrigin('http://localhost:3443'), 'http://localhost:3443');
+  assert.equal(LOCAL.resolveTrustedOrigin('http://localhost:3001'), 'http://localhost:3001');
+});
+
+test('sin orígenes extra configurados no acepta localhost:3001', () => {
+  assert.equal(STG.resolveTrustedOrigin('http://localhost:3001'), 'https://cgcom.stg.eudistack.net');
 });
 
 test('acepta subdominios de tenant hermanos de FRONTEND_ORIGIN', () => {
@@ -65,18 +69,26 @@ test('guard fija frame-ancestors desde la configuración, nunca desde el origin 
   assert.equal(origin, 'https://cgcom.stg.eudistack.net');
   assert.equal(
     res.headers['Content-Security-Policy'],
-    'frame-ancestors https://cgcom.stg.eudistack.net http://localhost:3001 https://*.stg.eudistack.net',
+    'frame-ancestors https://cgcom.stg.eudistack.net https://*.stg.eudistack.net',
   );
 });
 
-test('guard respeta el fallback y el puerto en el comodín de tenant', () => {
+test('guard desactiva caché y MIME sniffing en las respuestas con datos del certificado', () => {
+  const res = fakeResponse();
+  STG.guard(res, 'https://cgcom.stg.eudistack.net');
+
+  assert.equal(res.headers['Cache-Control'], 'no-store');
+  assert.equal(res.headers['X-Content-Type-Options'], 'nosniff');
+});
+
+test('guard respeta el fallback, los orígenes extra y el puerto en el comodín de tenant', () => {
   const res = fakeResponse();
   const origin = LOCAL.guard(res, undefined, 'https://landing.example');
 
   assert.equal(origin, 'https://landing.example');
   assert.equal(
     res.headers['Content-Security-Policy'],
-    'frame-ancestors https://cgcom.127.0.0.1.nip.io:4443 https://*.127.0.0.1.nip.io:4443',
+    'frame-ancestors https://cgcom.127.0.0.1.nip.io:4443 http://localhost:3001 https://*.127.0.0.1.nip.io:4443',
   );
 });
 
@@ -85,4 +97,10 @@ test('sin dominio padre frame-ancestors solo lista los orígenes conocidos', () 
   STANDALONE.guard(res, 'http://localhost:3443');
 
   assert.equal(res.headers['Content-Security-Policy'], 'frame-ancestors http://localhost:3000 http://localhost:3443');
+});
+
+test('parseOriginList separa por comas e ignora vacíos', () => {
+  assert.deepEqual(parseOriginList(undefined), []);
+  assert.deepEqual(parseOriginList(''), []);
+  assert.deepEqual(parseOriginList(' http://localhost:3001 , ,https://a.example'), ['http://localhost:3001', 'https://a.example']);
 });

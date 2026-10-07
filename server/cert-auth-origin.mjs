@@ -49,13 +49,24 @@ export function createCertAuthOriginPolicy({ frontendOrigin, landingOrigin = fro
   }
 
   /**
-   * Fija la cabecera frame-ancestors en `res` y devuelve el origen de confianza
-   * para el `?origin=` recibido.
+   * Fija las cabeceras de seguridad de cert-auth en `res` (frame-ancestors; sin
+   * caché ni MIME sniffing, porque la respuesta lleva datos personales del
+   * certificado) y devuelve el origen de confianza para el `?origin=` recibido.
    */
   function guard(res, candidate, fallback = frontendOrigin) {
     res.setHeader('Content-Security-Policy', `frame-ancestors ${frameAncestors.join(' ')}`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
     return resolveTrustedOrigin(candidate, fallback);
   }
 
   return { resolveTrustedOrigin, guard };
+}
+
+/** Lista de orígenes separada por comas (variable de entorno) → array sin vacíos. */
+export function parseOriginList(value) {
+  return (value ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
 }

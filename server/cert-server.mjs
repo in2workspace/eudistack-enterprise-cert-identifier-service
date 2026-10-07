@@ -32,7 +32,7 @@ import forge from 'node-forge';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createCertAuthOriginPolicy } from './cert-auth-origin.mjs';
+import { createCertAuthOriginPolicy, parseOriginList } from './cert-auth-origin.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CERTS_DIR = path.join(__dirname, 'certs');
@@ -41,8 +41,11 @@ const MTLS_PORT = parseInt(process.env.MTLS_PORT || '3444');
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
 // Origin of the popup page as seen by the browser (nginx URL in production, localhost in standalone mode)
 const LANDING_ORIGIN = process.env.LANDING_ORIGIN || FRONTEND_ORIGIN;
-// Direct URL to the mTLS server — must be reachable by the browser (Docker port mapping or NLB)
-const MTLS_ORIGIN = process.env.MTLS_ORIGIN || `https://localhost:${MTLS_PORT}`;
+// Direct URL to the mTLS server (local dev only) — must be reachable by the browser
+// (Docker port mapping), e.g. https://localhost:3444. Unset behind the ALB
+// (STG/DEV/PRO): the local dev landing is then never served, and a cert-auth
+// request without the ALB client-cert header is answered with CERT_AUTH_ERROR.
+const MTLS_ORIGIN = process.env.MTLS_ORIGIN || '';
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || '';
 // Explicit override for non-standard topologies; unset by default — the issuer
 // URL and tenant are resolved per-request from the caller's own Host (below),
@@ -53,7 +56,9 @@ const ALLOWED_ORIGINS = new Set([
   FRONTEND_ORIGIN,
   'http://localhost:3001',
 ]);
-const certAuthOrigins = createCertAuthOriginPolicy({ frontendOrigin: FRONTEND_ORIGIN, landingOrigin: LANDING_ORIGIN, staticOrigins: [...ALLOWED_ORIGINS] });
+// Extra origins allowed to embed cert-auth and receive the certificate
+// (comma-separated, dev only — never set in STG/DEV/PRO).
+const certAuthOrigins = createCertAuthOriginPolicy({ frontendOrigin: FRONTEND_ORIGIN, landingOrigin: LANDING_ORIGIN, staticOrigins: parseOriginList(process.env.CERT_AUTH_EXTRA_ORIGINS) });
 
 /**
  * Host público real (con puerto) de la petición entrante. nginx setea `Host`
@@ -499,6 +504,24 @@ const regularServer = http.createServer((req, res) => {
 </body></html>`);
         return;
       }
+    }
+
+    // ── ALB mTLS mode without client cert (passthrough: cancelled or none) ──
+    // Never fall back to the local dev landing behind the ALB.
+    if (!MTLS_ORIGIN) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
+<script>
+  if (window.opener || window.parent !== window) {
+    (window.opener || window.parent).postMessage(
+      { type: 'CERT_AUTH_ERROR', error: 'No se ha proporcionado ningún certificado digital' },
+      ${JSON.stringify(openerOrigin)}
+    );
+  }
+  window.close();
+</script>
+</body></html>`);
+      return;
     }
 
     // ── Local dev mode: serve iframe page (mTLS on MTLS_ORIGIN) ──────────
