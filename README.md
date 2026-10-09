@@ -34,6 +34,8 @@ Variables de entorno:
 |-----|---------|-----|
 | `CERT_PORT` | `3443` | Puerto HTTPS normal |
 | `MTLS_PORT` | `3444` | Puerto mTLS |
+| `MTLS_ORIGIN` | *(vacío)* | **Solo desarrollo local.** URL del servidor mTLS vista desde el navegador (p. ej. `https://localhost:3444`). Si está vacía (STG/DEV/PRO, detrás del ALB), nunca se sirve la landing de desarrollo: una petición a cert-auth sin certificado responde `CERT_AUTH_ERROR` |
+| `CERT_AUTH_EXTRA_ORIGINS` | *(vacío)* | **Solo desarrollo.** Orígenes extra, separados por comas, que pueden embeber cert-auth y recibir el certificado. No definir en STG/DEV/PRO |
 | `FRONTEND_ORIGIN` | `http://localhost:3000` | Origen permitido para `postMessage` |
 | `BOOTSTRAP_TOKEN` | *(hardcoded en `api/bootstrap.js`)* | Token de bootstrap del issuer |
 | `ISSUER_URL` | *(resuelto por petición, ver abajo)* | Override explícito de la URL del issuer; déjalo vacío salvo topologías no estándar |

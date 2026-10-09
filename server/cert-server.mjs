@@ -14,6 +14,10 @@
  * when the user dismisses the certificate-selection dialog, which prevented
  * the popup page from loading and sending postMessage back to the portal.
  *
+ * The landing page works both as a popup (window.opener) and embedded as a
+ * hidden iframe in the portal (window.parent); results are posted to whichever
+ * applies, so the portal can show the browser's certificate selector directly.
+ *
  * Usage:
  *   node server/cert-server.mjs
  */
@@ -28,6 +32,7 @@ import forge from 'node-forge';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { certAuthErrorPage, createCertAuthOriginPolicy, isPath, localDevLandingPage, parseOriginList, scriptStringLiteral } from './cert-auth-origin.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CERTS_DIR = path.join(__dirname, 'certs');
@@ -36,8 +41,11 @@ const MTLS_PORT = parseInt(process.env.MTLS_PORT || '3444');
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || 'http://localhost:3000';
 // Origin of the popup page as seen by the browser (nginx URL in production, localhost in standalone mode)
 const LANDING_ORIGIN = process.env.LANDING_ORIGIN || FRONTEND_ORIGIN;
-// Direct URL to the mTLS server — must be reachable by the browser (Docker port mapping or NLB)
-const MTLS_ORIGIN = process.env.MTLS_ORIGIN || `https://localhost:${MTLS_PORT}`;
+// Direct URL to the mTLS server (local dev only) — must be reachable by the browser
+// (Docker port mapping), e.g. https://localhost:3444. Unset behind the ALB
+// (STG/DEV/PRO): the local dev landing is then never served, and a cert-auth
+// request without the ALB client-cert header is answered with CERT_AUTH_ERROR.
+const MTLS_ORIGIN = process.env.MTLS_ORIGIN || '';
 const BOOTSTRAP_TOKEN = process.env.BOOTSTRAP_TOKEN || '';
 // Explicit override for non-standard topologies; unset by default — the issuer
 // URL and tenant are resolved per-request from the caller's own Host (below),
@@ -48,6 +56,9 @@ const ALLOWED_ORIGINS = new Set([
   FRONTEND_ORIGIN,
   'http://localhost:3001',
 ]);
+// Extra origins allowed to embed cert-auth and receive the certificate
+// (comma-separated, dev only — never set in STG/DEV/PRO).
+const certAuthOrigins = createCertAuthOriginPolicy({ frontendOrigin: FRONTEND_ORIGIN, landingOrigin: LANDING_ORIGIN, staticOrigins: parseOriginList(process.env.CERT_AUTH_EXTRA_ORIGINS) });
 
 /**
  * Host público real (con puerto) de la petición entrante. nginx setea `Host`
@@ -410,6 +421,21 @@ function corsHeaders(res, req) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
+/** Detrás del ALB (passthrough) sin certificado: selector cancelado o sin certificado. */
+function sendNoClientCertError(res, openerOrigin) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(certAuthErrorPage('No se ha proporcionado ningún certificado digital', openerOrigin));
+}
+
+/** Desarrollo local: landing con iframe oculto al servidor mTLS en MTLS_ORIGIN. */
+function sendLocalDevLanding(res, openerOrigin) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(localDevLandingPage({ openerOrigin, mtlsOrigin: MTLS_ORIGIN, mtlsPort: MTLS_PORT, styles: COMMON_STYLES }));
+}
+
+// Sin certificado de cliente, la landing de desarrollo solo se sirve si MTLS_ORIGIN está definida.
+const respondWithoutClientCert = MTLS_ORIGIN ? sendLocalDevLanding : sendNoClientCertError;
+
 const regularServer = http.createServer((req, res) => {
   corsHeaders(res, req);
 
@@ -420,9 +446,10 @@ const regularServer = http.createServer((req, res) => {
   }
 
   // ── Popup landing page with iframe to mTLS server ───────────────────────
-  if (req.url === '/issuance-portal/api/cert-auth' || req.url?.startsWith('/issuance-portal/api/cert-auth?')) {
+  if (isPath(req.url, '/issuance-portal/api/cert-auth')) {
     const reqUrl = new URL(req.url, 'http://localhost');
-    const openerOrigin = reqUrl.searchParams.get('origin') || FRONTEND_ORIGIN;
+    // Origen validado + frame-ancestors: solo los portales de confianza pueden embeber esta página.
+    const openerOrigin = certAuthOrigins.guard(res, reqUrl.searchParams.get('origin'));
 
     // ── ALB mTLS mode (STG): cert delivered via header ────────────────────
     const albCertPem = req.headers['x-amzn-mtls-clientcert'];
@@ -437,10 +464,10 @@ const regularServer = http.createServer((req, res) => {
           res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
 <script>
-  if (window.opener) {
-    window.opener.postMessage(
+  if (window.opener || window.parent !== window) {
+    (window.opener || window.parent).postMessage(
       { type: 'CERT_AUTH_ERROR', error: 'Error al procesar el certificado digital' },
-      ${JSON.stringify(openerOrigin)}
+      ${scriptStringLiteral(openerOrigin)}
     );
   }
   window.close();
@@ -465,10 +492,10 @@ const regularServer = http.createServer((req, res) => {
     <p><span class="spinner"></span></p>
   </div>
   <script>
-    if (window.opener) {
-      window.opener.postMessage(
+    if (window.opener || window.parent !== window) {
+      (window.opener || window.parent).postMessage(
         { type: 'CERT_AUTH_SUCCESS', data: ${certDataJSON} },
-        ${JSON.stringify(openerOrigin)}
+        ${scriptStringLiteral(openerOrigin)}
       );
       setTimeout(() => window.close(), 1200);
     }
@@ -481,10 +508,10 @@ const regularServer = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
 <script>
-  if (window.opener) {
-    window.opener.postMessage(
+  if (window.opener || window.parent !== window) {
+    (window.opener || window.parent).postMessage(
       { type: 'CERT_AUTH_ERROR', error: 'Error interno al leer el certificado' },
-      ${JSON.stringify(openerOrigin)}
+      ${scriptStringLiteral(openerOrigin)}
     );
   }
   window.close();
@@ -494,127 +521,9 @@ const regularServer = http.createServer((req, res) => {
       }
     }
 
-    // ── Local dev mode: serve iframe page (mTLS on MTLS_ORIGIN) ──────────
-
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(`<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8" />
-  <title>Certificado Digital - CGCOM</title>
-  <style>
-    ${COMMON_STYLES}
-    iframe { display: none; }
-    .retry-btn {
-      display: inline-block; margin-top: 1rem; padding: .5rem 1.5rem;
-      background: #E67E22; color: white; border: none; border-radius: 8px;
-      font-weight: 600; cursor: pointer; font-size: .95rem;
-    }
-    .retry-btn:hover { background: #D35400; }
-  </style>
-</head>
-<body>
-  <div class="card" id="content">
-    <h2>Certificado Digital</h2>
-    <p><span class="spinner"></span></p>
-    <p>Selecciona tu certificado en el diálogo del navegador...</p>
-    <p style="font-size:.85rem;color:#6b7280;margin-top:.5rem;">
-      Si no aparece el diálogo, asegúrate de tener un certificado digital instalado.
-    </p>
-  </div>
-
-  <!-- Hidden iframe that triggers the mTLS handshake on port ${MTLS_PORT}.
-       Propaga el origin real del tenant (R-5): el server mTLS no tiene forma
-       de resolverlo por sí mismo (puerto directo, sin Host de tenant). -->
-  <iframe id="mtls-frame" src="${MTLS_ORIGIN}/cert-auth?origin=${encodeURIComponent(openerOrigin)}"></iframe>
-
-  <script>
-    const FRONTEND = '${openerOrigin}';
-    const MTLS = '${MTLS_ORIGIN}';
-    let resolved = false;
-
-    // Listen for postMessage from the mTLS iframe
-    window.addEventListener('message', (event) => {
-      if (event.origin !== MTLS) return;
-      resolved = true;
-
-      const card = document.getElementById('content');
-
-      if (event.data?.type === 'CERT_IFRAME_SUCCESS') {
-        card.innerHTML =
-          '<h2 class="success">Certificado leído correctamente</h2>' +
-          '<p>Enviando datos al portal...</p>' +
-          '<p><span class="spinner"></span></p>';
-
-        if (window.opener) {
-          window.opener.postMessage(
-            { type: 'CERT_AUTH_SUCCESS', data: event.data.data },
-            FRONTEND
-          );
-          setTimeout(() => window.close(), 1200);
-        }
-      } else if (event.data?.type === 'CERT_IFRAME_NO_CERT') {
-        card.innerHTML =
-          '<h2>Certificado Digital</h2>' +
-          '<p class="error">No se ha proporcionado ningún certificado digital.</p>' +
-          '<p>Asegúrate de tener un certificado digital instalado ' +
-          '(ej: FNMT) y de seleccionarlo cuando el navegador lo solicite.</p>' +
-          '<button class="retry-btn" onclick="retry()">Reintentar</button>';
-
-        if (window.opener) {
-          window.opener.postMessage(
-            { type: 'CERT_AUTH_ERROR', error: 'No se ha proporcionado certificado' },
-            FRONTEND
-          );
-        }
-      } else if (event.data?.type === 'CERT_IFRAME_ERROR') {
-        card.innerHTML =
-          '<h2>Error</h2>' +
-          '<p class="error">' + (event.data.error || 'Error al procesar el certificado') + '</p>' +
-          '<button class="retry-btn" onclick="retry()">Reintentar</button>';
-
-        if (window.opener) {
-          window.opener.postMessage(
-            { type: 'CERT_AUTH_ERROR', error: event.data.error || 'Error al procesar el certificado' },
-            FRONTEND
-          );
-        }
-      }
-    });
-
-    // Timeout: if the iframe doesn't respond within 15s, the mTLS
-    // handshake probably failed (user canceled, no certs, etc.)
-    setTimeout(() => {
-      if (resolved) return;
-      resolved = true;
-      const card = document.getElementById('content');
-      card.innerHTML =
-        '<h2>Certificado Digital</h2>' +
-        '<p class="error">No se pudo conectar con el servidor de certificados.</p>' +
-        '<p>Es posible que no tengas un certificado digital instalado, ' +
-        'o que hayas cancelado la selección.</p>' +
-        '<button class="retry-btn" onclick="retry()">Reintentar</button>';
-
-      if (window.opener) {
-        window.opener.postMessage(
-          { type: 'CERT_AUTH_ERROR', error: 'No se pudo completar la lectura del certificado. Verifica que tienes un certificado digital instalado.' },
-          FRONTEND
-        );
-      }
-    }, 15000);
-
-    function retry() {
-      resolved = false;
-      document.getElementById('content').innerHTML =
-        '<h2>Certificado Digital</h2>' +
-        '<p><span class="spinner"></span></p>' +
-        '<p>Selecciona tu certificado en el diálogo del navegador...</p>';
-      document.getElementById('mtls-frame').src =
-        '${MTLS_ORIGIN}/cert-auth?origin=' + encodeURIComponent(FRONTEND) + '&t=' + Date.now();
-    }
-  </script>
-</body>
-</html>`);
+    // ── Sin certificado de cliente: landing de desarrollo (local, con MTLS_ORIGIN)
+    // o CERT_AUTH_ERROR detrás del ALB, que nunca sirve la landing de desarrollo.
+    respondWithoutClientCert(res, openerOrigin);
     return;
   }
 
@@ -711,7 +620,7 @@ const regularServer = http.createServer((req, res) => {
   }
 
   // ── Health check ───────────────────────────────────────────────────────
-  if (req.url === '/issuance-portal/health' || req.url === '/health') {
+  if (['/issuance-portal/health', '/health'].includes(req.url)) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'UP' }));
     return;
@@ -754,9 +663,11 @@ const mtlsServer = https.createServer(
   (req, res) => {
     // Origin real del tenant, propagado por query param desde la landing page
     // (R-5): este server no tiene Host de tenant propio (puerto directo 3444),
-    // así que LANDING_ORIGIN solo es fallback para llamadas sin el param.
+    // así que LANDING_ORIGIN es el fallback para llamadas sin el param o con
+    // un origen no permitido (cert-auth-origin.mjs). guard() fija además
+    // frame-ancestors para que solo la landing y el portal puedan embeberlo.
     const reqUrl = new URL(req.url, `https://localhost:${MTLS_PORT}`);
-    const targetOrigin = reqUrl.searchParams.get('origin') || LANDING_ORIGIN;
+    const targetOrigin = certAuthOrigins.guard(res, reqUrl.searchParams.get('origin'), LANDING_ORIGIN);
 
     // Allow the landing page to embed this in an iframe
     res.setHeader('Access-Control-Allow-Origin', targetOrigin);
@@ -776,7 +687,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_NO_CERT' },
-    ${JSON.stringify(targetOrigin)}
+    ${scriptStringLiteral(targetOrigin)}
   );
 </script>
 </body></html>`);
@@ -791,7 +702,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_ERROR', error: 'Error al procesar el certificado digital' },
-    ${JSON.stringify(targetOrigin)}
+    ${scriptStringLiteral(targetOrigin)}
   );
 </script>
 </body></html>`);
@@ -804,7 +715,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_SUCCESS', data: ${certDataJSON} },
-    ${JSON.stringify(targetOrigin)}
+    ${scriptStringLiteral(targetOrigin)}
   );
 </script>
 </body></html>`);
