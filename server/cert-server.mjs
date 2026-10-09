@@ -738,7 +738,7 @@ const regularServer = http.createServer((req, res) => {
   }
 
   // ── Health check ───────────────────────────────────────────────────────
-  if (req.url === '/issuance-portal/health' || req.url === '/health') {
+  if (['/issuance-portal/health', '/health'].includes(req.url)) {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'UP' }));
     return;
