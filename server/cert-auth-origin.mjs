@@ -63,6 +63,35 @@ export function createCertAuthOriginPolicy({ frontendOrigin, landingOrigin = fro
   return { resolveTrustedOrigin, guard };
 }
 
+/** `url` es exactamente `path` o `path` con querystring. */
+export function isPath(url, path) {
+  return url === path || (url ?? '').startsWith(`${path}?`);
+}
+
+/**
+ * Expresión JS segura para incrustar `value` en un <script> inline:
+ * encodeURIComponent elimina los caracteres con significado en HTML/JS
+ * (<, >, ", \, espacios, saltos de línea) y el navegador lo decodifica al ejecutar.
+ */
+export function scriptStringLiteral(value) {
+  return `decodeURIComponent("${encodeURIComponent(value)}")`;
+}
+
+/** Página que publica `CERT_AUTH_ERROR` al portal (popup u iframe) y se cierra. */
+export function certAuthErrorPage(error, targetOrigin) {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
+<script>
+  if (window.opener || window.parent !== window) {
+    (window.opener || window.parent).postMessage(
+      { type: 'CERT_AUTH_ERROR', error: ${scriptStringLiteral(error)} },
+      ${scriptStringLiteral(targetOrigin)}
+    );
+  }
+  window.close();
+</script>
+</body></html>`;
+}
+
 /** Lista de orígenes separada por comas (variable de entorno) → array sin vacíos. */
 export function parseOriginList(value) {
   return (value ?? '')

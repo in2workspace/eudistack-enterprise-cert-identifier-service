@@ -32,7 +32,7 @@ import forge from 'node-forge';
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createCertAuthOriginPolicy, parseOriginList } from './cert-auth-origin.mjs';
+import { certAuthErrorPage, createCertAuthOriginPolicy, isPath, parseOriginList, scriptStringLiteral } from './cert-auth-origin.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CERTS_DIR = path.join(__dirname, 'certs');
@@ -431,7 +431,7 @@ const regularServer = http.createServer((req, res) => {
   }
 
   // ── Popup landing page with iframe to mTLS server ───────────────────────
-  if (req.url === '/issuance-portal/api/cert-auth' || req.url?.startsWith('/issuance-portal/api/cert-auth?')) {
+  if (isPath(req.url, '/issuance-portal/api/cert-auth')) {
     const reqUrl = new URL(req.url, 'http://localhost');
     // Origen validado + frame-ancestors: solo los portales de confianza pueden embeber esta página.
     const openerOrigin = certAuthOrigins.guard(res, reqUrl.searchParams.get('origin'));
@@ -452,7 +452,7 @@ const regularServer = http.createServer((req, res) => {
   if (window.opener || window.parent !== window) {
     (window.opener || window.parent).postMessage(
       { type: 'CERT_AUTH_ERROR', error: 'Error al procesar el certificado digital' },
-      ${JSON.stringify(openerOrigin)}
+      ${scriptStringLiteral(openerOrigin)}
     );
   }
   window.close();
@@ -480,7 +480,7 @@ const regularServer = http.createServer((req, res) => {
     if (window.opener || window.parent !== window) {
       (window.opener || window.parent).postMessage(
         { type: 'CERT_AUTH_SUCCESS', data: ${certDataJSON} },
-        ${JSON.stringify(openerOrigin)}
+        ${scriptStringLiteral(openerOrigin)}
       );
       setTimeout(() => window.close(), 1200);
     }
@@ -496,7 +496,7 @@ const regularServer = http.createServer((req, res) => {
   if (window.opener || window.parent !== window) {
     (window.opener || window.parent).postMessage(
       { type: 'CERT_AUTH_ERROR', error: 'Error interno al leer el certificado' },
-      ${JSON.stringify(openerOrigin)}
+      ${scriptStringLiteral(openerOrigin)}
     );
   }
   window.close();
@@ -510,17 +510,7 @@ const regularServer = http.createServer((req, res) => {
     // Never fall back to the local dev landing behind the ALB.
     if (!MTLS_ORIGIN) {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
-<script>
-  if (window.opener || window.parent !== window) {
-    (window.opener || window.parent).postMessage(
-      { type: 'CERT_AUTH_ERROR', error: 'No se ha proporcionado ningún certificado digital' },
-      ${JSON.stringify(openerOrigin)}
-    );
-  }
-  window.close();
-</script>
-</body></html>`);
+      res.end(certAuthErrorPage('No se ha proporcionado ningún certificado digital', openerOrigin));
       return;
     }
 
@@ -559,7 +549,7 @@ const regularServer = http.createServer((req, res) => {
   <iframe id="mtls-frame" src="${MTLS_ORIGIN}/cert-auth?origin=${encodeURIComponent(openerOrigin)}"></iframe>
 
   <script>
-    const FRONTEND = ${JSON.stringify(openerOrigin)};
+    const FRONTEND = ${scriptStringLiteral(openerOrigin)};
     const MTLS = '${MTLS_ORIGIN}';
     let resolved = false;
 
@@ -815,7 +805,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_NO_CERT' },
-    ${JSON.stringify(targetOrigin)}
+    ${scriptStringLiteral(targetOrigin)}
   );
 </script>
 </body></html>`);
@@ -830,7 +820,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_ERROR', error: 'Error al procesar el certificado digital' },
-    ${JSON.stringify(targetOrigin)}
+    ${scriptStringLiteral(targetOrigin)}
   );
 </script>
 </body></html>`);
@@ -843,7 +833,7 @@ const mtlsServer = https.createServer(
 <script>
   window.parent.postMessage(
     { type: 'CERT_IFRAME_SUCCESS', data: ${certDataJSON} },
-    ${JSON.stringify(targetOrigin)}
+    ${scriptStringLiteral(targetOrigin)}
   );
 </script>
 </body></html>`);

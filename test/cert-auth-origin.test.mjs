@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCertAuthOriginPolicy, parseOriginList } from '../server/cert-auth-origin.mjs';
+import {
+  certAuthErrorPage,
+  createCertAuthOriginPolicy,
+  isPath,
+  parseOriginList,
+  scriptStringLiteral,
+} from '../server/cert-auth-origin.mjs';
 
 const STG = createCertAuthOriginPolicy({
   frontendOrigin: 'https://cgcom.stg.eudistack.net',
@@ -103,4 +109,28 @@ test('parseOriginList separa por comas e ignora vacíos', () => {
   assert.deepEqual(parseOriginList(undefined), []);
   assert.deepEqual(parseOriginList(''), []);
   assert.deepEqual(parseOriginList(' http://localhost:3001 , ,https://a.example'), ['http://localhost:3001', 'https://a.example']);
+});
+
+test('isPath acepta la ruta exacta o con querystring', () => {
+  assert.equal(isPath('/issuance-portal/api/cert-auth', '/issuance-portal/api/cert-auth'), true);
+  assert.equal(isPath('/issuance-portal/api/cert-auth?origin=x', '/issuance-portal/api/cert-auth'), true);
+  assert.equal(isPath('/issuance-portal/api/cert-authX', '/issuance-portal/api/cert-auth'), false);
+  assert.equal(isPath(undefined, '/issuance-portal/api/cert-auth'), false);
+});
+
+test('scriptStringLiteral no deja caracteres con significado en HTML/JS y devuelve el valor original', () => {
+  const hostile = '"</script><script>alert(1)</script>\\\n';
+  const literal = scriptStringLiteral(hostile);
+
+  assert.doesNotMatch(literal.slice('decodeURIComponent("'.length, -2), /[<>"\\\s]/);
+  assert.equal(new Function(`return ${literal};`)(), hostile);
+});
+
+test('certAuthErrorPage publica CERT_AUTH_ERROR con el error y el origen escapados', () => {
+  const page = certAuthErrorPage('Sin certificado', 'https://cgcom.stg.eudistack.net');
+
+  assert.match(page, /type: 'CERT_AUTH_ERROR'/);
+  assert.match(page, /error: decodeURIComponent\("Sin%20certificado"\)/);
+  assert.match(page, /decodeURIComponent\("https%3A%2F%2Fcgcom.stg.eudistack.net"\)/);
+  assert.match(page, /window\.close\(\)/);
 });
