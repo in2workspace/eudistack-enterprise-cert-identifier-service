@@ -92,6 +92,138 @@ export function certAuthErrorPage(error, targetOrigin) {
 </body></html>`;
 }
 
+/**
+ * Desarrollo local: landing de cert-auth que lanza el handshake mTLS en un iframe
+ * oculto hacia `mtlsOrigin` y reenvía el resultado al portal (popup o iframe).
+ */
+export function localDevLandingPage({ openerOrigin, mtlsOrigin, mtlsPort, styles }) {
+  return `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Certificado Digital - CGCOM</title>
+  <style>
+    ${styles}
+    iframe { display: none; }
+    .retry-btn {
+      display: inline-block; margin-top: 1rem; padding: .5rem 1.5rem;
+      background: #E67E22; color: white; border: none; border-radius: 8px;
+      font-weight: 600; cursor: pointer; font-size: .95rem;
+    }
+    .retry-btn:hover { background: #D35400; }
+  </style>
+</head>
+<body>
+  <div class="card" id="content">
+    <h2>Certificado Digital</h2>
+    <p><span class="spinner"></span></p>
+    <p>Selecciona tu certificado en el diálogo del navegador...</p>
+    <p style="font-size:.85rem;color:#6b7280;margin-top:.5rem;">
+      Si no aparece el diálogo, asegúrate de tener un certificado digital instalado.
+    </p>
+  </div>
+
+  <!-- Hidden iframe that triggers the mTLS handshake on port ${mtlsPort}.
+       Propaga el origin real del tenant (R-5): el server mTLS no tiene forma
+       de resolverlo por sí mismo (puerto directo, sin Host de tenant). -->
+  <iframe id="mtls-frame" src="${mtlsOrigin}/cert-auth?origin=${encodeURIComponent(openerOrigin)}"></iframe>
+
+  <script>
+    const FRONTEND = ${scriptStringLiteral(openerOrigin)};
+    const MTLS = '${mtlsOrigin}';
+    let resolved = false;
+
+    // Embedded mode (hidden iframe in the portal, no popup): tell the portal the
+    // landing loaded and the mTLS handshake is in progress, so it keeps waiting
+    // for the user's certificate selection instead of treating the load as a failure.
+    if (!window.opener && window.parent !== window) {
+      window.parent.postMessage({ type: 'CERT_AUTH_PENDING' }, FRONTEND);
+    }
+
+    // Listen for postMessage from the mTLS iframe
+    window.addEventListener('message', (event) => {
+      if (event.origin !== MTLS) return;
+      resolved = true;
+
+      const card = document.getElementById('content');
+
+      if (event.data?.type === 'CERT_IFRAME_SUCCESS') {
+        card.innerHTML =
+          '<h2 class="success">Certificado leído correctamente</h2>' +
+          '<p>Enviando datos al portal...</p>' +
+          '<p><span class="spinner"></span></p>';
+
+        if (window.opener || window.parent !== window) {
+          (window.opener || window.parent).postMessage(
+            { type: 'CERT_AUTH_SUCCESS', data: event.data.data },
+            FRONTEND
+          );
+          setTimeout(() => window.close(), 1200);
+        }
+      } else if (event.data?.type === 'CERT_IFRAME_NO_CERT') {
+        card.innerHTML =
+          '<h2>Certificado Digital</h2>' +
+          '<p class="error">No se ha proporcionado ningún certificado digital.</p>' +
+          '<p>Asegúrate de tener un certificado digital instalado ' +
+          '(ej: FNMT) y de seleccionarlo cuando el navegador lo solicite.</p>' +
+          '<button class="retry-btn" onclick="retry()">Reintentar</button>';
+
+        if (window.opener || window.parent !== window) {
+          (window.opener || window.parent).postMessage(
+            { type: 'CERT_AUTH_ERROR', error: 'No se ha proporcionado certificado' },
+            FRONTEND
+          );
+        }
+      } else if (event.data?.type === 'CERT_IFRAME_ERROR') {
+        card.innerHTML =
+          '<h2>Error</h2>' +
+          '<p class="error">' + (event.data.error || 'Error al procesar el certificado') + '</p>' +
+          '<button class="retry-btn" onclick="retry()">Reintentar</button>';
+
+        if (window.opener || window.parent !== window) {
+          (window.opener || window.parent).postMessage(
+            { type: 'CERT_AUTH_ERROR', error: event.data.error || 'Error al procesar el certificado' },
+            FRONTEND
+          );
+        }
+      }
+    });
+
+    // Timeout: if the iframe doesn't respond within 15s, the mTLS
+    // handshake probably failed (user canceled, no certs, etc.)
+    setTimeout(() => {
+      if (resolved) return;
+      resolved = true;
+      const card = document.getElementById('content');
+      card.innerHTML =
+        '<h2>Certificado Digital</h2>' +
+        '<p class="error">No se pudo conectar con el servidor de certificados.</p>' +
+        '<p>Es posible que no tengas un certificado digital instalado, ' +
+        'o que hayas cancelado la selección.</p>' +
+        '<button class="retry-btn" onclick="retry()">Reintentar</button>';
+
+      if (window.opener || window.parent !== window) {
+        (window.opener || window.parent).postMessage(
+          { type: 'CERT_AUTH_ERROR', error: 'No se pudo completar la lectura del certificado. Verifica que tienes un certificado digital instalado.' },
+          FRONTEND
+        );
+      }
+    }, 15000);
+
+    function retry() {
+      resolved = false;
+      document.getElementById('content').innerHTML =
+        '<h2>Certificado Digital</h2>' +
+        '<p><span class="spinner"></span></p>' +
+        '<p>Selecciona tu certificado en el diálogo del navegador...</p>';
+      document.getElementById('mtls-frame').src =
+        '${mtlsOrigin}/cert-auth?origin=' + encodeURIComponent(FRONTEND) + '&t=' + Date.now();
+    }
+  </script>
+</body>
+</html>`;
+}
+
 /** Lista de orígenes separada por comas (variable de entorno) → array sin vacíos. */
 export function parseOriginList(value) {
   return (value ?? '')

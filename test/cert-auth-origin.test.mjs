@@ -4,6 +4,7 @@ import {
   certAuthErrorPage,
   createCertAuthOriginPolicy,
   isPath,
+  localDevLandingPage,
   parseOriginList,
   scriptStringLiteral,
 } from '../server/cert-auth-origin.mjs';
@@ -133,4 +134,25 @@ test('certAuthErrorPage publica CERT_AUTH_ERROR con el error y el origen escapad
   assert.match(page, /error: decodeURIComponent\("Sin%20certificado"\)/);
   assert.match(page, /decodeURIComponent\("https%3A%2F%2Fcgcom.stg.eudistack.net"\)/);
   assert.match(page, /window\.close\(\)/);
+});
+
+test('localDevLandingPage lanza el iframe mTLS, anuncia CERT_AUTH_PENDING y escapa el origen', () => {
+  const page = localDevLandingPage({
+    openerOrigin: 'https://sandbox.127.0.0.1.nip.io:4443',
+    mtlsOrigin: 'https://localhost:3444',
+    mtlsPort: 3444,
+    styles: 'body{}',
+  });
+
+  const expected = [
+    '<iframe id="mtls-frame" src="https://localhost:3444/cert-auth?origin=https%3A%2F%2Fsandbox.127.0.0.1.nip.io%3A4443"></iframe>',
+    'const FRONTEND = decodeURIComponent("https%3A%2F%2Fsandbox.127.0.0.1.nip.io%3A4443");',
+    "const MTLS = 'https://localhost:3444';",
+    "type: 'CERT_AUTH_PENDING'",
+    'on port 3444',
+    'body{}',
+  ];
+  for (const fragment of expected) {
+    assert.ok(page.includes(fragment), fragment);
+  }
 });
