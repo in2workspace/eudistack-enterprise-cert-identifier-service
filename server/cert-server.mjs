@@ -421,103 +421,16 @@ function corsHeaders(res, req) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 
-const regularServer = http.createServer((req, res) => {
-  corsHeaders(res, req);
+/** Detrás del ALB (passthrough) sin certificado: selector cancelado o sin certificado. */
+function sendNoClientCertError(res, openerOrigin) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(certAuthErrorPage('No se ha proporcionado ningún certificado digital', openerOrigin));
+}
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  // ── Popup landing page with iframe to mTLS server ───────────────────────
-  if (isPath(req.url, '/issuance-portal/api/cert-auth')) {
-    const reqUrl = new URL(req.url, 'http://localhost');
-    // Origen validado + frame-ancestors: solo los portales de confianza pueden embeber esta página.
-    const openerOrigin = certAuthOrigins.guard(res, reqUrl.searchParams.get('origin'));
-
-    // ── ALB mTLS mode (STG): cert delivered via header ────────────────────
-    const albCertPem = req.headers['x-amzn-mtls-clientcert'];
-    if (albCertPem) {
-      try {
-        const pem = decodeURIComponent(albCertPem);
-        const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
-        const derBuffer = Buffer.from(b64, 'base64');
-        const certData = extractCertificateAttributes(derBuffer);
-
-        if (!certData) {
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-          res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
-<script>
-  if (window.opener || window.parent !== window) {
-    (window.opener || window.parent).postMessage(
-      { type: 'CERT_AUTH_ERROR', error: 'Error al procesar el certificado digital' },
-      ${scriptStringLiteral(openerOrigin)}
-    );
-  }
-  window.close();
-</script>
-</body></html>`);
-          return;
-        }
-
-        const certDataJSON = JSON.stringify(certData);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(`<!DOCTYPE html>
-<html lang="es">
-<head>
-  <meta charset="utf-8"/>
-  <title>Certificado leído — CGCOM</title>
-  <style>${COMMON_STYLES}</style>
-</head>
-<body>
-  <div class="card">
-    <h2 class="success">Certificado leído correctamente</h2>
-    <p>Enviando datos al portal...</p>
-    <p><span class="spinner"></span></p>
-  </div>
-  <script>
-    if (window.opener || window.parent !== window) {
-      (window.opener || window.parent).postMessage(
-        { type: 'CERT_AUTH_SUCCESS', data: ${certDataJSON} },
-        ${scriptStringLiteral(openerOrigin)}
-      );
-      setTimeout(() => window.close(), 1200);
-    }
-  </script>
-</body>
-</html>`);
-        return;
-      } catch (err) {
-        console.error('Error procesando cert ALB mTLS:', err.message);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
-<script>
-  if (window.opener || window.parent !== window) {
-    (window.opener || window.parent).postMessage(
-      { type: 'CERT_AUTH_ERROR', error: 'Error interno al leer el certificado' },
-      ${scriptStringLiteral(openerOrigin)}
-    );
-  }
-  window.close();
-</script>
-</body></html>`);
-        return;
-      }
-    }
-
-    // ── ALB mTLS mode without client cert (passthrough: cancelled or none) ──
-    // Never fall back to the local dev landing behind the ALB.
-    if (!MTLS_ORIGIN) {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(certAuthErrorPage('No se ha proporcionado ningún certificado digital', openerOrigin));
-      return;
-    }
-
-    // ── Local dev mode: serve iframe page (mTLS on MTLS_ORIGIN) ──────────
-
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(`<!DOCTYPE html>
+/** Desarrollo local: landing con iframe oculto al servidor mTLS en MTLS_ORIGIN. */
+function sendLocalDevLanding(res, openerOrigin) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(`<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8" />
@@ -642,6 +555,99 @@ const regularServer = http.createServer((req, res) => {
   </script>
 </body>
 </html>`);
+}
+
+// Sin certificado de cliente, la landing de desarrollo solo se sirve si MTLS_ORIGIN está definida.
+const respondWithoutClientCert = MTLS_ORIGIN ? sendLocalDevLanding : sendNoClientCertError;
+
+const regularServer = http.createServer((req, res) => {
+  corsHeaders(res, req);
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // ── Popup landing page with iframe to mTLS server ───────────────────────
+  if (isPath(req.url, '/issuance-portal/api/cert-auth')) {
+    const reqUrl = new URL(req.url, 'http://localhost');
+    // Origen validado + frame-ancestors: solo los portales de confianza pueden embeber esta página.
+    const openerOrigin = certAuthOrigins.guard(res, reqUrl.searchParams.get('origin'));
+
+    // ── ALB mTLS mode (STG): cert delivered via header ────────────────────
+    const albCertPem = req.headers['x-amzn-mtls-clientcert'];
+    if (albCertPem) {
+      try {
+        const pem = decodeURIComponent(albCertPem);
+        const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s+/g, '');
+        const derBuffer = Buffer.from(b64, 'base64');
+        const certData = extractCertificateAttributes(derBuffer);
+
+        if (!certData) {
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
+<script>
+  if (window.opener || window.parent !== window) {
+    (window.opener || window.parent).postMessage(
+      { type: 'CERT_AUTH_ERROR', error: 'Error al procesar el certificado digital' },
+      ${scriptStringLiteral(openerOrigin)}
+    );
+  }
+  window.close();
+</script>
+</body></html>`);
+          return;
+        }
+
+        const certDataJSON = JSON.stringify(certData);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <title>Certificado leído — CGCOM</title>
+  <style>${COMMON_STYLES}</style>
+</head>
+<body>
+  <div class="card">
+    <h2 class="success">Certificado leído correctamente</h2>
+    <p>Enviando datos al portal...</p>
+    <p><span class="spinner"></span></p>
+  </div>
+  <script>
+    if (window.opener || window.parent !== window) {
+      (window.opener || window.parent).postMessage(
+        { type: 'CERT_AUTH_SUCCESS', data: ${certDataJSON} },
+        ${scriptStringLiteral(openerOrigin)}
+      );
+      setTimeout(() => window.close(), 1200);
+    }
+  </script>
+</body>
+</html>`);
+        return;
+      } catch (err) {
+        console.error('Error procesando cert ALB mTLS:', err.message);
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end(`<!DOCTYPE html><html><head><meta charset="utf-8"/></head><body>
+<script>
+  if (window.opener || window.parent !== window) {
+    (window.opener || window.parent).postMessage(
+      { type: 'CERT_AUTH_ERROR', error: 'Error interno al leer el certificado' },
+      ${scriptStringLiteral(openerOrigin)}
+    );
+  }
+  window.close();
+</script>
+</body></html>`);
+        return;
+      }
+    }
+
+    // ── Sin certificado de cliente: landing de desarrollo (local, con MTLS_ORIGIN)
+    // o CERT_AUTH_ERROR detrás del ALB, que nunca sirve la landing de desarrollo.
+    respondWithoutClientCert(res, openerOrigin);
     return;
   }
 
