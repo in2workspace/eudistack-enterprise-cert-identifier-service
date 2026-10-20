@@ -26,20 +26,18 @@ export default async function handler(req, res) {
   try {
     const userData = req.body || {};
     const nameParts = (userData.name || '').trim().split(' ');
-    const firstName = nameParts[0] || 'María';
-    const lastName = nameParts.slice(1).join(' ') || 'García López';
+    const givenName = nameParts[0] || 'María';
+    const familyName = nameParts.slice(1).join(' ') || 'García López';
 
     const bootstrapPayload = {
       credential_configuration_id: 'doctorid.sd.1',
       payload: {
-        firstName,
-        lastName,
-        registrationNumber: userData.collegiateNumber || '282801234',
-        nationalId: userData.dni || '12345678A',
-        provincialBoard: 'COM Barcelona',
-        specialty: 'Medicina Interna',
-        email: userData.email || 'maria.garcia@cgcom.es',
-        country: 'ES',
+        givenName,
+        familyName,
+        personal_administrative_number: userData.collegiateNumber || '282801234',
+        medical_board: ['COM Barcelona'],
+        medical_speciality: ['Internal Medicine'],
+        legally_entitled: true,
       },
       delivery: 'ui',
       email: userData.email || 'maria.garcia@cgcom.es',
